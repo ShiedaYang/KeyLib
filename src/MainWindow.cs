@@ -17,6 +17,9 @@ internal sealed class MainWindow : SoftWindow
     private readonly Panel content;
     private readonly Label status;
     private readonly Label activeShortcut;
+    private readonly Icon brandIcon;
+    private readonly NotifyIcon trayIcon;
+    private readonly ContextMenuStrip trayMenu;
     private readonly Timer idle;
     private readonly Native.ForegroundCallback foregroundCallback;
     private IntPtr hook;
@@ -52,14 +55,33 @@ internal sealed class MainWindow : SoftWindow
         ClientSize = new Size(1042, 632);
         StartPosition = FormStartPosition.CenterScreen;
         Text = "KeyLib · 本地密码库";
+        brandIcon = BrandMark.CreateIcon();
+        Icon = brandIcon;
+        trayMenu = new ContextMenuStrip();
+        trayMenu.Items.Add("打开 KeyLib", null, (sender, args) => ShowMain());
+        trayMenu.Items.Add("锁定密码库", null, (sender, args) => Lock("密码库已锁定。"));
+        trayMenu.Items.Add(new ToolStripSeparator());
+        trayMenu.Items.Add("退出 KeyLib", null, (sender, args) => ExitApplication());
+        trayIcon = new NotifyIcon { Icon = brandIcon, Text = "KeyLib", ContextMenuStrip = trayMenu };
+        trayIcon.MouseClick += delegate(object sender, MouseEventArgs args)
+        {
+            if (args.Button == MouseButtons.Left) ShowMain();
+        };
+
+        var header = new Panel { Bounds = new Rectangle(0, 0, ClientSize.Width, 70) };
+        var mark = new BrandMark { Bounds = new Rectangle(25, 18, 36, 36) };
         var heading = Theme.Label("KeyLib", 69, 15, 210, 41, Theme.Heading, Theme.Ink);
-        Controls.Add(new BrandMark { Bounds = new Rectangle(25, 18, 36, 36) });
-        Controls.Add(heading);
+        header.Controls.Add(mark);
+        header.Controls.Add(heading);
+        MakeDraggable(header);
+        MakeDraggable(mark);
         MakeDraggable(heading);
-        AddWindowButtons(true);
+        AddWindowButtons(true, parent: header);
         activeShortcut = Theme.Label("快捷键  " + Shortcut, 720, 18, 230, 35, Theme.BodyBold, Theme.Muted);
         activeShortcut.TextAlign = ContentAlignment.MiddleRight;
-        Controls.Add(activeShortcut);
+        header.Controls.Add(activeShortcut);
+        MakeDraggable(activeShortcut);
+        Controls.Add(header);
         Controls.Add(new Panel { Bounds = new Rectangle(0, 70, 1042, 1), BackColor = Theme.Line });
         content = new Panel { Bounds = new Rectangle(20, 89, 1002, 486) };
         Controls.Add(content);
@@ -85,10 +107,12 @@ internal sealed class MainWindow : SoftWindow
             {
                 args.Cancel = true;
                 CancelPopup();
-                WindowState = FormWindowState.Minimized;
+                trayIcon.Visible = true;
+                Hide();
                 return;
             }
             closed = true;
+            trayIcon.Visible = false;
             Lock("");
             if (popupInput != null) popupInput.Dispose();
             if (bridge != null) bridge.Dispose();
@@ -123,6 +147,19 @@ internal sealed class MainWindow : SoftWindow
     {
         quitRequested = true;
         Close();
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        bool releaseTray = disposing && !IsDisposed;
+        if (releaseTray && trayIcon != null)
+        {
+            trayIcon.Visible = false;
+            trayIcon.Dispose();
+            trayMenu.Dispose();
+        }
+        base.Dispose(disposing);
+        if (releaseTray && brandIcon != null) brandIcon.Dispose();
     }
 
     private void QueueLock(string reason)
@@ -792,6 +829,7 @@ internal sealed class MainWindow : SoftWindow
         if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
         Show();
         Activate();
+        trayIcon.Visible = false;
     }
 
     private void Status(string text) { status.Text = text; }

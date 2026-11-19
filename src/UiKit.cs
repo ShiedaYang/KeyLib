@@ -1,6 +1,7 @@
 using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 internal class SoftWindow : Form
 {
@@ -37,53 +38,46 @@ internal class SoftWindow : Form
             args.Graphics.DrawPath(pen, outline);
     }
 
-    protected void AddWindowButtons(bool minimize, bool passive = false)
+    protected void AddWindowButtons(bool minimize, bool passive = false, Control parent = null)
     {
+        Control host = parent ?? this;
         var close = new SoftButton("关闭", false, "cross")
         {
-            Bounds = new Rectangle(ClientSize.Width - 48, 19, 30, 30),
+            Bounds = new Rectangle(host.ClientSize.Width - 48, 19, 30, 30),
             Anchor = AnchorStyles.Top | AnchorStyles.Right
         };
         if (passive)
             close.KeepTargetFocused();
         close.Click += delegate { Close(); };
-        Controls.Add(close);
+        host.Controls.Add(close);
         if (minimize)
         {
             var hide = new SoftButton("最小化", false, "dash")
             {
-                Bounds = new Rectangle(ClientSize.Width - 82, 19, 30, 30),
+                Bounds = new Rectangle(host.ClientSize.Width - 82, 19, 30, 30),
                 Anchor = AnchorStyles.Top | AnchorStyles.Right
             };
             hide.Click += delegate { WindowState = FormWindowState.Minimized; };
-            Controls.Add(hide);
+            host.Controls.Add(hide);
         }
     }
 
-    protected void MakeDraggable(Control title)
+    protected void MakeDraggable(Control surface)
     {
-        Point start = Point.Empty;
-        bool moving = false;
-        title.MouseDown += delegate(object sender, MouseEventArgs args)
+        surface.MouseDown += delegate(object sender, MouseEventArgs args)
         {
-            if (args.Button != MouseButtons.Left)
-                return;
-            moving = true;
-            start = Point.Subtract(Cursor.Position, new Size(Location));
-            title.Capture = true;
-        };
-        title.MouseMove += delegate
-        {
-            if (moving)
-                Location = Point.Subtract(Cursor.Position, new Size(start));
-        };
-        title.MouseCaptureChanged += delegate { moving = false; };
-        title.MouseUp += delegate
-        {
-            moving = false;
-            title.Capture = false;
+            if (args.Button != MouseButtons.Left) return;
+            const int nonClientLeftDown = 0x00a1;
+            const int caption = 2;
+            Point screen = surface.PointToScreen(args.Location);
+            int position = unchecked((screen.X & 0xffff) | (screen.Y << 16));
+            ReleaseCapture();
+            SendMessage(Handle, nonClientLeftDown, (IntPtr)caption, (IntPtr)position);
         };
     }
+
+    [DllImport("user32.dll")] private static extern bool ReleaseCapture();
+    [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr window, int message, IntPtr wParam, IntPtr lParam);
 }
 
 internal sealed class SoftButton : Button
@@ -247,13 +241,32 @@ internal sealed class BrandMark : Control
 
     protected override void OnPaint(PaintEventArgs args)
     {
-        Graphics graphics = args.Graphics;
+        PaintMark(args.Graphics, ClientRectangle);
+    }
+
+    internal static Icon CreateIcon()
+    {
+        using (var image = new Bitmap(32, 32))
+        using (var graphics = Graphics.FromImage(image))
+        {
+            PaintMark(graphics, new Rectangle(0, 0, 32, 32));
+            IntPtr handle = image.GetHicon();
+            try
+            {
+                using (Icon original = Icon.FromHandle(handle)) return (Icon)original.Clone();
+            }
+            finally { DestroyIcon(handle); }
+        }
+    }
+
+    private static void PaintMark(Graphics graphics, Rectangle bounds)
+    {
         graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        using (GraphicsPath shape = Theme.Rounded(ClientRectangle, 11))
+        using (GraphicsPath shape = Theme.Rounded(bounds, 10))
         using (var fill = new SolidBrush(Theme.Accent))
             graphics.FillPath(fill, shape);
 
-        float x = Width / 2f, y = Height / 2f;
+        float x = bounds.Left + bounds.Width / 2f, y = bounds.Top + bounds.Height / 2f;
         using (var pen = new Pen(Color.White, 2.1f) { StartCap = LineCap.Round, EndCap = LineCap.Round })
         {
             graphics.DrawLine(pen, x - 6, y - 8, x - 6, y + 8);
@@ -261,6 +274,8 @@ internal sealed class BrandMark : Control
             graphics.DrawLine(pen, x - 2, y - 1, x + 6, y + 8);
         }
     }
+
+    [DllImport("user32.dll")] private static extern bool DestroyIcon(IntPtr icon);
 }
 
 internal static class Theme
