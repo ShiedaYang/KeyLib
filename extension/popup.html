@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="popup.css">
+<script src="popup.js" defer></script>
+<title>KeyLib</title>
+</head>
+<body>
+  <header>
+    <svg width="34" height="34" viewBox="0 0 34 34" aria-hidden="true">
+      <rect width="34" height="34" rx="9" fill="#1654c2"></rect>
+      <path d="M11 9v16m0-6L22 9m-7 6 8 10" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"/>
+    </svg>
+    <div><h1>KeyLib</h1><p id="site"></p></div><kbd>Alt+C</kbd>
+  </header>
+  <p id="shortcutNotice" role="status" hidden></p>
+  <p id="status" role="status">正在确认当前页面…</p>
+  <main hidden id="main">
+    <section id="accounts" aria-label="匹配账号"></section>
+    <nav aria-label="其他操作">
+      <button id="openSave" type="button">快速保存</button>
+      <button id="openGenerator" type="button">随机密码</button>
+    </nav>
+    <form id="saveForm" hidden>
+      <label>用户名<input id="user" autocomplete="off" maxlength="512"></label>
+      <label>密码<input type="password" id="password" autocomplete="off" required maxlength="2048"></label>
+      <div class="actions">
+        <button id="readPage" type="button">读取当前表单</button>
+        <button class="primary" type="submit">加密保存</button>
+      </div>
+    </form>
+    <section id="generator" hidden>
+      <div class="generator-options">
+        <label>长度<input id="length" type="number" min="12" max="96" value="24"></label>
+        <label class="checked"><input id="symbols" type="checkbox" checked>包含符号</label>
+      </div>
+      <output id="generated" aria-label="新生成的密码"></output>
+      <div class="actions">
+        <button id="again" type="button">重新生成</button>
+        <button id="saveGenerated" type="button">带入保存</button>
+        <button id="fillGenerated" type="button" class="primary">填写密码</button>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

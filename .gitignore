@@ -1,0 +1,10 @@
+/bin/
+/obj/
+/.vs/
+*.softvault
+*.softvault.*
+instance.lock
+browser-host.json
+hotkey.txt
+*.log
+*.tmp
