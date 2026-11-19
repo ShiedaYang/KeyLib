@@ -6,6 +6,7 @@ const panels = ["saveForm", "generator"];
 let context;
 let generated = "";
 let busy = false;
+let firstFillButton = null;
 
 function status(message = "") {
   element("status").textContent = message;
@@ -100,6 +101,8 @@ async function list() {
   const { items } = await native({ op: "list" });
   const target = element("accounts");
   target.replaceChildren();
+  firstFillButton = null;
+  element("keyboardHint").hidden = items.length === 0;
   if (!items.length) status("这个网站还没有保存的账号。");
   for (const item of items) {
     const row = document.createElement("article");
@@ -120,6 +123,7 @@ async function list() {
     }));
     row.append(description, button);
     target.append(row);
+    if (!firstFillButton) firstFillButton = button;
   }
 }
 
@@ -166,6 +170,20 @@ element("saveForm").addEventListener("submit", operate(async () => {
   await list();
   status("账号已加密保存。");
 }));
+
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape") {
+    event.preventDefault();
+    window.close();
+    return;
+  }
+  if (event.key !== "Enter" || event.repeat || busy || !firstFillButton ||
+      event.altKey || event.ctrlKey || event.shiftKey || event.metaKey ||
+      !element("saveForm").hidden || !element("generator").hidden ||
+      event.target.closest?.("input, textarea, select, button, a")) return;
+  event.preventDefault();
+  firstFillButton.click();
+});
 
 (async () => {
   if (chrome.commands) {

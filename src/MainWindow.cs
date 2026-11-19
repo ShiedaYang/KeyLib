@@ -28,14 +28,22 @@ internal sealed class MainWindow : SoftWindow
     private DateTime retryHotkeyAt;
     private int serial;
     private bool closed;
+    private bool quitRequested;
     private PopupSession popup;
+    private PopupInput popupInput;
+    private int popupSerial;
+    private AppCatalog catalog = AppCatalog.Empty;
+    private Task<AppCatalog> pendingCatalog;
+    private DateTime catalogReadAt;
+    private readonly Dictionary<string, InstalledApp> autoLinks = new Dictionary<string, InstalledApp>();
+    private readonly Dictionary<string, string> autoFingerprints = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<uint, long> shownProcesses = new Dictionary<uint, long>();
+    private IntPtr observedForeground;
+    private DateTime checkForegroundAt;
     private ListBox list;
     private TextBox search;
     private Panel details;
     private Label resultCount;
-    private Label itemHeading;
-    private SoftButton[] filters;
-    private int category;
 
     internal MainWindow(string directory)
     {
@@ -58,19 +66,31 @@ internal sealed class MainWindow : SoftWindow
         Controls.Add(new Panel { Bounds = new Rectangle(20, 592, 1002, 1), BackColor = Theme.Line });
         status = Theme.Label("", 24, 597, 994, 29, Theme.Small, Theme.Muted);
         Controls.Add(status);
-        idle = new Timer { Interval = 180 };
+        idle = new Timer { Interval = 100 };
         idle.Tick += delegate
         {
             if (popup != null && Native.GetForegroundWindow() != popup.TargetWindow) CancelPopup();
             RouteShortcut(false);
             if (vault != null && IdleMilliseconds() >= 5 * 60 * 1000) Lock("电脑闲置 5 分钟，密码库已锁定。");
+            ObserveForeground();
+            TryAutoPopup();
+            if (vault != null && pendingCatalog == null && DateTime.UtcNow - catalogReadAt > TimeSpan.FromMinutes(2))
+                LoadCatalogInBackground();
         };
         foregroundCallback = ForegroundChanged;
         Shown += OnStart;
-        FormClosing += delegate
+        FormClosing += delegate(object sender, FormClosingEventArgs args)
         {
+            if (args.CloseReason == CloseReason.UserClosing && !quitRequested)
+            {
+                args.Cancel = true;
+                CancelPopup();
+                WindowState = FormWindowState.Minimized;
+                return;
+            }
             closed = true;
             Lock("");
+            if (popupInput != null) popupInput.Dispose();
             if (bridge != null) bridge.Dispose();
             bridge = null;
             if (hook != IntPtr.Zero) Native.UnhookWinEvent(hook);
@@ -85,6 +105,7 @@ internal sealed class MainWindow : SoftWindow
 
     private void OnStart(object sender, EventArgs args)
     {
+        popupInput = new PopupInput(Handle);
         hook = Native.SetWinEventHook(3, 3, IntPtr.Zero, foregroundCallback, 0, 0, 0);
         idle.Start();
         SystemEvents.SessionSwitch += SessionSwitched;
@@ -95,6 +116,13 @@ internal sealed class MainWindow : SoftWindow
             catch (Exception error) { Status(error.Message); }
         }
         RouteShortcut(true);
+        LoadCatalogInBackground();
+    }
+
+    internal void ExitApplication()
+    {
+        quitRequested = true;
+        Close();
     }
 
     private void QueueLock(string reason)
@@ -145,6 +173,15 @@ internal sealed class MainWindow : SoftWindow
             RouteShortcut(false);
             if (!browserForeground) TogglePopup();
         }
+        else if (message.Msg == PopupInput.MessageId && popupInput != null)
+        {
+            int action = message.WParam.ToInt32();
+            if (!popupInput.IsReleasedMessage(action) && popup != null && popup.Token == message.LParam.ToInt32())
+            {
+                if (action == PopupInput.Cancel) CancelPopup();
+                else if (action == PopupInput.Confirm && !popup.Busy) popup.View.ConfirmSelection();
+            }
+        }
         base.WndProc(ref message);
     }
 
@@ -155,9 +192,7 @@ internal sealed class MainWindow : SoftWindow
         list = null;
         search = null;
         details = null;
-        itemHeading = null;
         resultCount = null;
-        filters = null;
     }
 
     private void RenderLocked()
@@ -187,6 +222,7 @@ internal sealed class MainWindow : SoftWindow
                 if (closed || stamp != serial) { opened.Dispose(); return; }
                 CancelPopup();
                 vault = opened;
+                RebuildAutoLinks();
                 RenderVault();
                 Status("密码库已解锁。");
             }
@@ -203,30 +239,20 @@ internal sealed class MainWindow : SoftWindow
         var navigation = new Panel { Bounds = new Rectangle(0, 0, 188, 486), BackColor = Theme.Sidebar };
         content.Controls.Add(navigation);
         navigation.Controls.Add(Theme.Label("密码库", 14, 11, 150, 29, Theme.BodyBold, Theme.Ink));
-        string[] names = { "全部账号", "桌面应用", "网站账号" };
-        filters = new SoftButton[names.Length];
-        for (int index = 0; index < names.Length; index++)
-        {
-            int selected = index;
-            filters[index] = NavigationButton(navigation, names[index], 49 + index * 41, () =>
-            {
-                category = selected;
-                RefreshEntries();
-            });
-        }
-        navigation.Controls.Add(new Panel { Bounds = new Rectangle(14, 188, 160, 1), BackColor = Theme.Line });
-        NavigationButton(navigation, "随机密码", 204, ShowGenerator);
-        NavigationButton(navigation, "加密备份", 245, () =>
+        var all = NavigationButton(navigation, "全部账号", 49, () => { search.Focus(); RefreshEntries(); });
+        all.Current = true;
+        navigation.Controls.Add(new Panel { Bounds = new Rectangle(14, 102, 160, 1), BackColor = Theme.Line });
+        NavigationButton(navigation, "随机密码", 118, ShowGenerator);
+        NavigationButton(navigation, "加密备份", 159, () =>
         {
             if (vault == null) return;
             using (var dialog = new BackupDialog(vault)) dialog.ShowDialog(this);
-            if (vault != null) RefreshEntries();
+            if (vault != null) { RebuildAutoLinks(); RefreshEntries(); }
         });
-        NavigationButton(navigation, "设置", 286, ShowSettings);
+        NavigationButton(navigation, "设置", 200, ShowSettings);
         NavigationButton(navigation, "锁定", 437, () => Lock("密码库已锁定。"));
 
-        itemHeading = Theme.Label(Heading(), 211, 0, 230, 36, Theme.Subheading, Theme.Ink);
-        content.Controls.Add(itemHeading);
+        content.Controls.Add(Theme.Label("全部账号", 211, 0, 230, 36, Theme.Subheading, Theme.Ink));
         AddAction(content, "新建账号", 483, 2, 102, true, () => Edit(null, null, null));
         search = AddInput(content, "搜索账号", 211, 48, 374, 180, false);
         search.TextChanged += delegate { RefreshEntries(); };
@@ -253,32 +279,20 @@ internal sealed class MainWindow : SoftWindow
         return button;
     }
 
-    private string Heading()
-    {
-        return category == 1 ? "桌面应用" : category == 2 ? "网站账号" : "全部账号";
-    }
-
     private void RefreshEntries()
     {
         if (list == null || vault == null) return;
         string term = search.Text.Trim();
         var previous = list.SelectedItem as VaultEntry;
-        itemHeading.Text = Heading();
-        for (int index = 0; index < filters.Length; index++)
-        {
-            filters[index].Current = index == category;
-            filters[index].Invalidate();
-        }
         list.BeginUpdate();
         try
         {
             list.Items.Clear();
             foreach (VaultEntry entry in vault.Entries.OrderBy(item => item.Name, StringComparer.CurrentCultureIgnoreCase))
             {
-                if (category == 1 && string.IsNullOrEmpty(entry.AppPath)) continue;
-                if (category == 2 && string.IsNullOrEmpty(entry.Origin)) continue;
                 if (!Contains(entry.Name, term) && !Contains(entry.User, term) &&
-                    !Contains(entry.Origin, term) && !Contains(entry.AppPath, term)) continue;
+                    !Contains(entry.Origin, term) && !Contains(entry.AppPath, term) &&
+                    !Contains(entry.Notes, term)) continue;
                 int added = list.Items.Add(entry);
                 if (previous != null && previous.Id == entry.Id) list.SelectedIndex = added;
             }
@@ -307,9 +321,6 @@ internal sealed class MainWindow : SoftWindow
         var name = Theme.Label(entry.Name, 0, 0, 370, 37, Theme.Subheading, Theme.Ink);
         name.AutoEllipsis = true;
         details.Controls.Add(name);
-        string target = !string.IsNullOrEmpty(entry.Origin) ? "网站账号"
-            : !string.IsNullOrEmpty(entry.AppPath) ? "桌面应用" : "未绑定应用或网站";
-        details.Controls.Add(Theme.Label(target, 0, 45, 370, 21, Theme.Small, Theme.Accent));
         details.Controls.Add(new Panel { Bounds = new Rectangle(0, 79, 370, 1), BackColor = Theme.Line });
         AddDetail("用户名", entry.User, 95);
         Label password = AddDetail("密码", "••••••••••••", 155, 263);
@@ -324,6 +335,11 @@ internal sealed class MainWindow : SoftWindow
         int y = 215;
         if (!string.IsNullOrEmpty(entry.Origin)) { AddDetail("网站", entry.Origin, y); y += 57; }
         if (!string.IsNullOrEmpty(entry.AppPath)) { AddDetail("绑定应用", Path.GetFileName(entry.AppPath), y); y += 57; }
+        else
+        {
+            InstalledApp automatic;
+            if (autoLinks.TryGetValue(entry.Id, out automatic)) { AddDetail("备注匹配应用", automatic.Name, y); y += 57; }
+        }
         if (!string.IsNullOrEmpty(entry.Notes)) AddDetail("备注", entry.Notes.Replace('\r', ' ').Replace('\n', ' '), y);
         AddAction(details, "编辑账号", 0, 432, 109, true, EditSelected);
         AddAction(details, "删除", 121, 432, 76, false, RemoveSelected);
@@ -357,18 +373,9 @@ internal sealed class MainWindow : SoftWindow
         {
             e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
             e.Graphics.FillPath(fill, tile);
-            if (!string.IsNullOrEmpty(entry.Origin))
-            {
-                e.Graphics.DrawEllipse(edge, iconX + 9, iconY + 9, 16, 16);
-                e.Graphics.DrawEllipse(edge, iconX + 13, iconY + 9, 8, 16);
-                e.Graphics.DrawLine(edge, iconX + 10, iconY + 17, iconX + 24, iconY + 17);
-            }
-            else
-            {
-                e.Graphics.DrawRectangle(edge, iconX + 8, iconY + 9, 18, 12);
-                e.Graphics.DrawLine(edge, iconX + 17, iconY + 21, iconX + 17, iconY + 25);
-                e.Graphics.DrawLine(edge, iconX + 12, iconY + 25, iconX + 22, iconY + 25);
-            }
+            e.Graphics.DrawEllipse(edge, iconX + 8, iconY + 11, 10, 10);
+            e.Graphics.DrawLine(edge, iconX + 18, iconY + 16, iconX + 26, iconY + 16);
+            e.Graphics.DrawLine(edge, iconX + 24, iconY + 16, iconX + 24, iconY + 20);
         }
         using (var line = new Pen(Theme.Line))
             e.Graphics.DrawLine(line, e.Bounds.Left + 56, e.Bounds.Bottom - 1, e.Bounds.Right - 2, e.Bounds.Bottom - 1);
@@ -394,7 +401,7 @@ internal sealed class MainWindow : SoftWindow
     {
         if (vault == null) return;
         ShowMain();
-        using (var dialog = new EntryDialog(entry, target, generated))
+        using (var dialog = new EntryDialog(entry, target, generated, catalog, RefreshCatalog))
         {
             if (dialog.ShowDialog(this) != DialogResult.OK || vault == null) return;
             try
@@ -402,15 +409,21 @@ internal sealed class MainWindow : SoftWindow
                 VaultEntry saved = dialog.Saved;
                 if (entry == null && target != null)
                 {
-                    var duplicate = vault.Entries.FirstOrDefault(item => string.Equals(item.AppPath, saved.AppPath,
-                        StringComparison.OrdinalIgnoreCase) && item.User == saved.User);
+                    var duplicate = vault.Entries.FirstOrDefault(item => DetectPath(item, target.Path) && item.User == saved.User);
                     if (duplicate != null)
                     {
                         if (!ConfirmDialog.Ask(this, "保存账号", "更新此应用的同名账号？")) return;
+                        if (vault == null) return;
                         saved.Id = duplicate.Id;
+                        if (!dialog.ApplicationSelectionChanged && !string.IsNullOrEmpty(duplicate.AppPath))
+                        {
+                            saved.AppPath = duplicate.AppPath;
+                            saved.AppHash = target.Hash;
+                        }
                     }
                 }
                 vault.Save(saved);
+                RebuildAutoLinks();
                 RefreshEntries();
                 Status("账号已加密保存。");
             }
@@ -423,7 +436,7 @@ internal sealed class MainWindow : SoftWindow
         var entry = list == null ? null : list.SelectedItem as VaultEntry;
         if (entry == null) return;
         if (!ConfirmDialog.Ask(this, "删除账号", "删除「" + entry.Name + "」？") || vault == null) return;
-        try { vault.Remove(entry.Id); RefreshEntries(); Status("账号已删除。"); }
+        try { vault.Remove(entry.Id); RebuildAutoLinks(); RefreshEntries(); Status("账号已删除。"); }
         catch (Exception error) { Status(error.Message); }
     }
 
@@ -449,7 +462,7 @@ internal sealed class MainWindow : SoftWindow
                 BrowserBridge.Unregister(bridgePath);
             }
             RouteShortcut(true);
-        }))
+        }, ExitApplication))
             dialog.ShowDialog(this);
     }
 
@@ -490,6 +503,7 @@ internal sealed class MainWindow : SoftWindow
                     value.User = request.user;
                     value.Password = request.password;
                     vault.Save(value);
+                    RebuildAutoLinks();
                     RefreshEntries();
                     Status("网站账号已加密保存。");
                     return new { saved = true };
@@ -504,10 +518,9 @@ internal sealed class MainWindow : SoftWindow
         if (popup != null) { CancelPopup(); return; }
         IntPtr hwnd = Native.GetForegroundWindow();
         if (hwnd == IntPtr.Zero) return;
-        var active = new PopupSession(hwnd);
-        popup = active;
-        active.View.FormClosed += delegate { if (popup == active) popup = null; };
-        active.View.Present(hwnd);
+        checkForegroundAt = DateTime.MaxValue;
+        var active = OpenPopup(hwnd);
+        if (active == null) return;
         if (vault == null)
         {
             active.View.Message("密码库已锁定", "请先输入主密码。", "解锁密码库", () => { CancelPopup(); ShowMain(); });
@@ -536,17 +549,159 @@ internal sealed class MainWindow : SoftWindow
             DesktopTarget target = await Task.Run(() => DesktopTarget.Inspect(hwnd));
             if (!IsCurrent(active)) return;
             if (target == null) { active.View.Message("无法识别当前应用", "请返回支持的桌面窗口。", null, null); return; }
-            var matches = vault.Entries.Where(target.Matches).ToList();
-            bool changed = vault.Entries.Any(entry => string.Equals(entry.AppPath, target.Path, StringComparison.OrdinalIgnoreCase) &&
-                !target.Matches(entry));
-            active.View.Accounts(target.Name, matches, changed, entry => FillPair(active, target, entry),
-                () => { CancelPopup(); Edit(null, target, null); }, () => ShowPopupGenerator(active, target));
+            ShowAccounts(active, target, MatchingEntries(target));
+            if (vault.Entries.Any(entry => DetectPath(entry, target.Path))) MarkShown(target);
         }
         catch (Exception)
         {
             if (IsCurrent(active))
                 active.View.Message("无法读取应用身份", "请在普通权限的桌面应用里重试。", null, null);
         }
+    }
+
+    private PopupSession OpenPopup(IntPtr target)
+    {
+        var active = new PopupSession(target, ++popupSerial);
+        popup = active;
+        active.View.FormClosed += delegate
+        {
+            if (popup != active) return;
+            popup = null;
+            popupInput.Stop();
+        };
+        if (!popupInput.Start(active.View.Handle, target, active.Token))
+        {
+            CancelPopup();
+            Status("Windows 无法为快捷窗口接管 Esc 和回车，请重试。");
+            return null;
+        }
+        active.View.Present(target);
+        return active;
+    }
+
+    private void ShowAccounts(PopupSession active, DesktopTarget target, List<VaultEntry> matches)
+    {
+        bool changed = matches.Count == 0 && vault.Entries.Any(entry => DetectPath(entry, target.Path));
+        InstalledApp known = catalog.ByPath(target.Path);
+        active.View.Accounts(known == null ? target.Name : known.Name, matches, changed,
+            entry => FillPair(active, target, entry),
+            () => { CancelPopup(); Edit(null, target, null); }, () => ShowPopupGenerator(active, target));
+    }
+
+    private async void LoadCatalogInBackground()
+    {
+        try { await RefreshCatalog(); }
+        catch (Exception) { /* Manual filling and previously selected app identities remain available. */ }
+    }
+
+    private async Task<AppCatalog> RefreshCatalog()
+    {
+        if (pendingCatalog != null) return await pendingCatalog;
+        if (DateTime.UtcNow - catalogReadAt < TimeSpan.FromSeconds(15)) return catalog;
+        catalogReadAt = DateTime.UtcNow;
+        var scan = Task.Run(() => AppCatalog.Load());
+        pendingCatalog = scan;
+        try
+        {
+            catalog = await scan;
+            if (!closed && vault != null)
+            {
+                RebuildAutoLinks();
+                RenderDetails();
+                if (popup == null) checkForegroundAt = DateTime.UtcNow.AddMilliseconds(350);
+            }
+            return catalog;
+        }
+        finally { pendingCatalog = null; }
+    }
+
+    private void RebuildAutoLinks()
+    {
+        autoLinks.Clear();
+        if (vault == null) return;
+        var resolvedNotes = new Dictionary<string, InstalledApp>();
+        foreach (VaultEntry entry in vault.Entries)
+        {
+            if (entry.DisableAppDetection || !string.IsNullOrEmpty(entry.AppPath) || string.IsNullOrWhiteSpace(entry.Notes)) continue;
+            InstalledApp found;
+            if (!resolvedNotes.TryGetValue(entry.Notes, out found))
+            {
+                found = catalog.MatchNotes(entry.Notes);
+                resolvedNotes.Add(entry.Notes, found);
+            }
+            if (found != null) autoLinks[entry.Id] = found;
+        }
+    }
+
+    private bool DetectPath(VaultEntry entry, string path)
+    {
+        if (!string.IsNullOrEmpty(entry.AppPath))
+            return string.Equals(entry.AppPath, path, StringComparison.OrdinalIgnoreCase);
+        InstalledApp link;
+        return autoLinks.TryGetValue(entry.Id, out link) && string.Equals(link.Path, path, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private List<VaultEntry> MatchingEntries(DesktopTarget target)
+    {
+        var matches = new List<VaultEntry>();
+        foreach (VaultEntry entry in vault.Entries)
+        {
+            if (!DetectPath(entry, target.Path)) continue;
+            if (!string.IsNullOrEmpty(entry.AppPath))
+            {
+                if (target.Matches(entry)) matches.Add(entry);
+                continue;
+            }
+            string pinned;
+            if (!autoFingerprints.TryGetValue(target.Path, out pinned))
+            {
+                pinned = target.Hash;
+                autoFingerprints.Add(target.Path, pinned);
+            }
+            if (pinned == target.Hash) matches.Add(entry);
+        }
+        return matches;
+    }
+
+    private void ObserveForeground()
+    {
+        IntPtr window = Native.GetForegroundWindow();
+        if (window == observedForeground) return;
+        observedForeground = window;
+        checkForegroundAt = DateTime.UtcNow.AddMilliseconds(350);
+    }
+
+    private async void TryAutoPopup()
+    {
+        if (closed || vault == null || popup != null || observedForeground == IntPtr.Zero ||
+            DateTime.UtcNow < checkForegroundAt || vault.Entries.Count == 0)
+            return;
+        checkForegroundAt = DateTime.MaxValue;
+        IntPtr window = observedForeground;
+        VaultSession opened = vault;
+        try
+        {
+            DesktopTarget target = await Task.Run(() => DesktopTarget.Inspect(window, false));
+            if (target == null || vault != opened || popup != null || !target.StillForeground()) return;
+            long alreadyShown;
+            if (shownProcesses.TryGetValue(target.ProcessId, out alreadyShown) && alreadyShown == target.StartedTicks)
+                return;
+            if (!opened.Entries.Any(entry => DetectPath(entry, target.Path))) return;
+            target.Hash = await Task.Run(() => DesktopTarget.Fingerprint(target.Path));
+            if (vault != opened || popup != null || !target.StillForeground()) return;
+            var matches = MatchingEntries(target);
+            if (matches.Count == 0) return;
+            MarkShown(target);
+            var active = OpenPopup(window);
+            if (active != null) ShowAccounts(active, target, matches);
+        }
+        catch (Exception) { /* Other applications can close or change permissions during inspection. */ }
+    }
+
+    private void MarkShown(DesktopTarget target)
+    {
+        if (shownProcesses.Count >= 1024) shownProcesses.Clear();
+        shownProcesses[target.ProcessId] = target.StartedTicks;
     }
 
     private async void FillPair(PopupSession active, DesktopTarget target, VaultEntry entry)
@@ -601,6 +756,7 @@ internal sealed class MainWindow : SoftWindow
     private void ForegroundChanged(IntPtr handle, uint type, IntPtr window, int objectId, int childId, uint thread, uint time)
     {
         RouteShortcut(false);
+        ObserveForeground();
         if (popup == null || window == IntPtr.Zero || window == popup.TargetWindow ||
             unchecked((int)(time - popup.OpenedAt)) < 0) return;
         CancelPopup();
@@ -610,6 +766,7 @@ internal sealed class MainWindow : SoftWindow
     {
         PopupSession old = popup;
         popup = null;
+        if (popupInput != null) popupInput.Stop();
         if (old != null && !old.View.IsDisposed) old.View.Close();
     }
 
@@ -619,6 +776,9 @@ internal sealed class MainWindow : SoftWindow
         CancelPopup();
         if (vault != null) vault.Dispose();
         vault = null;
+        autoLinks.Clear();
+        autoFingerprints.Clear();
+        shownProcesses.Clear();
         foreach (Form owned in OwnedForms) owned.Close();
         if (!closed)
         {

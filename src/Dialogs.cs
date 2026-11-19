@@ -72,17 +72,22 @@ internal sealed class EntryDialog : VaultDialog
     private readonly Label binding;
     private readonly Label status;
     private readonly VaultEntry draft;
+    private readonly Func<Task<AppCatalog>> refreshCatalog;
+    private AppCatalog catalog;
     internal VaultEntry Saved { get; private set; }
+    internal bool ApplicationSelectionChanged { get; private set; }
 
-    internal EntryDialog(VaultEntry entry, DesktopTarget target, string generated)
+    internal EntryDialog(VaultEntry entry, DesktopTarget target, string generated, AppCatalog catalog,
+        Func<Task<AppCatalog>> refreshCatalog)
         : base(entry == null ? "快速保存账号" : "编辑账号", 498, 473)
     {
         draft = entry == null ? new VaultEntry { Id = Guid.NewGuid().ToString("N") } : entry.Copy();
+        this.catalog = catalog;
+        this.refreshCatalog = refreshCatalog;
         if (target != null)
         {
-            draft.AppPath = target.Path;
-            draft.AppHash = target.Hash;
             if (string.IsNullOrWhiteSpace(draft.Name)) draft.Name = target.Name;
+            if (string.IsNullOrWhiteSpace(draft.Notes)) draft.Notes = target.Name;
         }
         if (generated != null) draft.Password = generated;
         name = Field("名称", 24, 62, 450, 180, value: draft.Name);
@@ -98,7 +103,9 @@ internal sealed class EntryDialog : VaultDialog
         origin = Field("网站地址（可选）", 24, 264, 450, 512, value: draft.Origin);
         notes = Field("备注（可选）", 24, 330, 320, 4000, value: draft.Notes);
         binding = Theme.Label("", 24, 394, 320, 22, Theme.Small, Theme.Muted);
+        binding.AutoEllipsis = true;
         UpdateBinding();
+        notes.TextChanged += delegate { UpdateBinding(); };
         Controls.Add(binding);
         Action("选择应用", 354, 355, 120, false, ChooseApplication);
         var save = Action("保存", 354, 415, 120, true, Save);
@@ -107,30 +114,37 @@ internal sealed class EntryDialog : VaultDialog
         Controls.Add(status);
     }
 
-    private void ChooseApplication()
+    private async void ChooseApplication()
     {
-        using (var browse = new OpenFileDialog { Title = "绑定 Windows 应用", Filter = "应用程序 (*.exe)|*.exe" })
+        status.Text = "正在查找已安装应用…";
+        try
         {
-            if (browse.ShowDialog(this) != DialogResult.OK) return;
-            if (DesktopTarget.IsBrowser(Path.GetFileName(browse.FileName)))
+            catalog = await refreshCatalog();
+            if (IsDisposed) return;
+            status.Text = "";
+            using (var picker = new AppPicker(catalog))
             {
-                status.Text = "浏览器账号请按 HTTPS 网址绑定。";
-                return;
-            }
-            try
-            {
-                draft.AppHash = DesktopTarget.Fingerprint(browse.FileName);
-                draft.AppPath = browse.FileName;
+                if (picker.ShowDialog(this) != DialogResult.OK) return;
+                draft.AppHash = picker.App == null ? null : DesktopTarget.Fingerprint(picker.App.Path);
+                draft.AppPath = picker.App == null ? null : picker.App.Path;
+                draft.DisableAppDetection = picker.Disabled;
+                ApplicationSelectionChanged = true;
                 UpdateBinding();
             }
-            catch (Exception error) { status.Text = error.Message; }
         }
+        catch (Exception error) { if (!IsDisposed) status.Text = error.Message; }
     }
 
     private void UpdateBinding()
     {
-        binding.Text = string.IsNullOrEmpty(draft.AppPath) ? "应用未绑定" :
-            "已绑定 · " + Path.GetFileName(draft.AppPath);
+        if (!string.IsNullOrEmpty(draft.AppPath))
+        {
+            InstalledApp installed = catalog.ByPath(draft.AppPath);
+            binding.Text = "手动关联：" + (installed == null ? Path.GetFileName(draft.AppPath) : installed.Name);
+            return;
+        }
+        InstalledApp automatic = draft.DisableAppDetection ? null : catalog.MatchNotes(notes.Text);
+        binding.Text = automatic == null ? "应用关联可留空。可在备注中填写应用名。" : "备注匹配：" + automatic.Name;
     }
 
     private void Save()

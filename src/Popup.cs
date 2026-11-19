@@ -7,11 +7,12 @@ using System.Windows.Forms;
 internal sealed class PopupSession
 {
     internal readonly IntPtr TargetWindow;
+    internal readonly int Token;
     internal readonly uint OpenedAt = unchecked((uint)Environment.TickCount);
     internal readonly AccountPopup View = new AccountPopup();
     internal bool Busy;
 
-    internal PopupSession(IntPtr window) { TargetWindow = window; }
+    internal PopupSession(IntPtr window, int token) { TargetWindow = window; Token = token; }
 }
 
 internal sealed class AccountPopup : SoftWindow
@@ -21,6 +22,7 @@ internal sealed class AccountPopup : SoftWindow
     private readonly Label hint;
     private readonly Panel body;
     private readonly Panel line;
+    private Action confirm;
 
     internal AccountPopup()
     {
@@ -37,7 +39,7 @@ internal sealed class AccountPopup : SoftWindow
         Controls.Add(body);
         line = new Panel { Bounds = new Rectangle(20, 146, PopupWidth - 40, 1), BackColor = Theme.Line };
         Controls.Add(line);
-        hint = Theme.Label("切换窗口即取消", 20, 150, PopupWidth - 40, 30, Theme.Small, Theme.Muted);
+        hint = Theme.Label("Esc 或点击外部关闭", 20, 150, PopupWidth - 40, 30, Theme.Small, Theme.Muted);
         hint.AutoEllipsis = true;
         Controls.Add(hint);
     }
@@ -87,6 +89,8 @@ internal sealed class AccountPopup : SoftWindow
                 int buttonLeft = ordered.Count > 4 ? 246 : 265;
                 AddButton("填写", buttonLeft, index * 50 + 4, 78, true, () => fill(entry), list);
             }
+            confirm = () => fill(ordered[0]);
+            SetHint((ordered.Count > 1 ? "回车填写首个账号" : "回车填写") + "，Esc 或点击外部关闭");
         }
         AddButton("快速保存", 0, rows * 50 + 5, 165, false, save);
         AddButton("随机密码", 177, rows * 50 + 5, 165, false, generate);
@@ -109,15 +113,18 @@ internal sealed class AccountPopup : SoftWindow
         AddButton("重新生成", 0, 58, fill == null ? 165 : 103, false, again);
         AddButton("保存账号", fill == null ? 177 : 111, 58, fill == null ? 165 : 103, fill == null, save);
         if (fill != null) AddButton("填写密码框", 222, 58, 121, true, fill);
-        SetHint("24 个字符，包含大小写字母、数字和符号");
+        if (fill != null) confirm = fill;
+        SetHint(fill == null ? "Esc 或点击外部关闭" : "回车填入密码，Esc 或点击外部关闭");
     }
 
     internal void SetHint(string message) { hint.Text = message; }
     internal void EnableActions(bool enabled) { body.Enabled = enabled; }
+    internal void ConfirmSelection() { if (body.Enabled && confirm != null) confirm(); }
 
     private void Reset(string title, int bodyHeight)
     {
         while (body.Controls.Count > 0) body.Controls[0].Dispose();
+        confirm = null;
         heading.Text = title;
         body.Enabled = true;
         body.Height = bodyHeight;
@@ -125,7 +132,7 @@ internal sealed class AccountPopup : SoftWindow
         line.Top = below + 2;
         hint.Top = below + 6;
         ClientSize = new Size(PopupWidth, below + 42);
-        hint.Text = "切换窗口即取消";
+        hint.Text = "Esc 或点击外部关闭";
     }
 
     private void AddButton(string title, int x, int y, int width, bool primary, Action click, Control parent = null)

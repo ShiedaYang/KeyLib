@@ -13,6 +13,7 @@ internal sealed class DesktopTarget
     internal string Path;
     internal string Hash;
     internal string Name;
+    internal long StartedTicks;
 
     internal static bool IsExtensionBrowser(string fileName)
     {
@@ -42,7 +43,7 @@ internal sealed class DesktopTarget
         catch (Win32Exception) { return ""; }
     }
 
-    internal static DesktopTarget Inspect(IntPtr window)
+    internal static DesktopTarget Inspect(IntPtr window, bool includeHash = true)
     {
         uint id;
         Native.GetWindowThreadProcessId(window, out id);
@@ -53,8 +54,8 @@ internal sealed class DesktopTarget
             if (IsBrowser(System.IO.Path.GetFileName(path))) return null;
             string name = process.MainModule.FileVersionInfo.ProductName;
             if (string.IsNullOrWhiteSpace(name)) name = System.IO.Path.GetFileNameWithoutExtension(path);
-            return new DesktopTarget { Window = window, ProcessId = id, Path = path,
-                Name = name.Length > 120 ? name.Substring(0, 120) : name, Hash = Fingerprint(path) };
+            return new DesktopTarget { Window = window, ProcessId = id, Path = path, StartedTicks = process.StartTime.Ticks,
+                Name = name.Length > 120 ? name.Substring(0, 120) : name, Hash = includeHash ? Fingerprint(path) : null };
         }
     }
 
@@ -98,7 +99,13 @@ internal static class DesktopFiller
             await Task.Delay(125);
         }
         else if (focus == 0)
-            throw new InvalidOperationException("请先点击此应用的用户名框或密码框。");
+        {
+            await Task.Run(() =>
+            {
+                if (target.StillForeground()) fields.Username.SetFocus();
+            });
+            Guard(target, active);
+        }
 
         if (!await MatchFocus(target, 1, active) ||
             !Native.TypeIntoForeground(target.Window, entry.User))

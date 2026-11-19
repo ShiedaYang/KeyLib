@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "KeyLib",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "用本机KeyLib在当前 HTTPS 页面匹配、填写和保存账号。",
   "minimum_chrome_version": "110",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxztcTdALJ4JthU1eXdZabEE8ZoWdNIO9FIhLaeOFmWtQ2qHJOOjLiOFDgF8FIsbho9FH+m9mCQGKB7SY0ESQc48NMDoD81+UrrO+3wCnradKL05fhqT1mC6jfjTROsx0W7OrNi2zJSCHv20o1GPa3Lnfg4zXJhHIcKKY1ECIWsJvkNKrRj9hOetO1aiYbzbsX+ktFcDO+z/nKF4gVtnPRpD8MnRB5NXk4Ki9136K8pLIf8AsHeFK89V1RPk+DjRuGasSsX8mIniwbSN+5yQAb9wakpobZgQHTKSZlMH+c9YOplLiuioXWfzkxljybiWa6xP5ms7Wr5MKud7OQ0w1QQIDAQAB",

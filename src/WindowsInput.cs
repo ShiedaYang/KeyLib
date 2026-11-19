@@ -92,6 +92,11 @@ internal static class Native
     }
 
 #if QA
+    internal static bool PressTestKey(ushort key)
+    {
+        return Send(new[] { Key(key, 0, 0), Key(key, 0, 2) });
+    }
+
     internal static bool PressTestHotkey(int key)
     {
         // Used exclusively by the local, data-free self-test fixture.

@@ -108,6 +108,7 @@ public sealed class VaultEntry
     public string Password { get; set; }
     public string AppPath { get; set; }
     public string AppHash { get; set; }
+    public bool DisableAppDetection { get; set; }
     public string Origin { get; set; }
     public string Notes { get; set; }
 
@@ -134,6 +135,7 @@ public sealed class VaultEntry
     {
         return Name == other.Name && User == other.User && Password == other.Password &&
             (AppPath ?? "") == (other.AppPath ?? "") && (AppHash ?? "") == (other.AppHash ?? "") &&
+            DisableAppDetection == other.DisableAppDetection &&
             (Origin ?? "") == (other.Origin ?? "") && (Notes ?? "") == (other.Notes ?? "");
     }
 }
