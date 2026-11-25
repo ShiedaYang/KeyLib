@@ -1,15 +1,18 @@
 using System;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.Linq;
 using System.Windows.Forms;
 
 internal sealed class AppPicker : VaultDialog
 {
     private readonly AppCatalog catalog;
-    private readonly ListBox apps;
+    private readonly SoftListBox apps;
+    private readonly SoftListFrame appRows;
     private readonly TextBox filter;
     private readonly Label status;
     private readonly SoftButton link;
+    private readonly AppIconCache icons = new AppIconCache();
     internal InstalledApp App { get; private set; }
     internal bool Disabled { get; private set; }
 
@@ -17,13 +20,14 @@ internal sealed class AppPicker : VaultDialog
     {
         this.catalog = catalog;
         filter = Field("搜索应用名称", 24, 65, 476, 160);
-        apps = new ListBox
+        apps = new SoftListBox
         {
             Bounds = new Rectangle(24, 138, 476, 204), BackColor = Theme.Sidebar, ForeColor = Theme.Ink,
             BorderStyle = BorderStyle.None, DrawMode = DrawMode.OwnerDrawFixed, ItemHeight = 43,
             IntegralHeight = false, AccessibleName = "已安装应用"
         };
-        Controls.Add(apps);
+        appRows = new SoftListFrame(apps);
+        Controls.Add(appRows);
         apps.DrawItem += DrawApp;
         apps.DoubleClick += delegate { Choose(); };
         status = Theme.Label("", 24, 351, 476, 28, Theme.Small, Theme.Muted);
@@ -51,6 +55,7 @@ internal sealed class AppPicker : VaultDialog
             if (apps.Items.Count > 0) apps.SelectedIndex = 0;
         }
         finally { apps.EndUpdate(); }
+        appRows.UpdateScroll();
         status.Text = apps.Items.Count == 0 ? "没有找到匹配的应用。" : apps.Items.Count + " 个应用";
         link.Enabled = apps.SelectedIndex >= 0;
     }
@@ -68,18 +73,35 @@ internal sealed class AppPicker : VaultDialog
         DialogResult = DialogResult.OK;
     }
 
-    private static void DrawApp(object sender, DrawItemEventArgs args)
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) icons.Clear();
+        base.Dispose(disposing);
+    }
+
+    private void DrawApp(object sender, DrawItemEventArgs args)
     {
         if (args.Index < 0) return;
         var app = (InstalledApp)((ListBox)sender).Items[args.Index];
         bool selected = (args.State & DrawItemState.Selected) != 0;
         using (var brush = new SolidBrush(selected ? Theme.TintHover : Theme.Sidebar))
             args.Graphics.FillRectangle(brush, args.Bounds);
+        var iconBounds = new Rectangle(args.Bounds.X + 10, args.Bounds.Y + 9, 24, 24);
+        Bitmap icon = icons.Get(app.Path);
+        if (icon == null) Theme.DrawIcon(args.Graphics, "vault", iconBounds, Theme.Muted);
+        else
+        {
+            GraphicsState previous = args.Graphics.Save();
+            args.Graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
+            args.Graphics.PixelOffsetMode = PixelOffsetMode.Half;
+            args.Graphics.DrawImage(icon, iconBounds);
+            args.Graphics.Restore(previous);
+        }
         var flags = TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix;
         TextRenderer.DrawText(args.Graphics, app.Name, Theme.BodyBold,
-            new Rectangle(args.Bounds.X + 11, args.Bounds.Y + 2, args.Bounds.Width - 22, 22), Theme.Ink, flags);
+            new Rectangle(args.Bounds.X + 44, args.Bounds.Y + 2, args.Bounds.Width - 55, 22), Theme.Ink, flags);
         TextRenderer.DrawText(args.Graphics, System.IO.Path.GetFileName(app.Path), Theme.Small,
-            new Rectangle(args.Bounds.X + 11, args.Bounds.Y + 22, args.Bounds.Width - 22, 18), Theme.Muted, flags);
+            new Rectangle(args.Bounds.X + 44, args.Bounds.Y + 22, args.Bounds.Width - 55, 18), Theme.Muted, flags);
         if ((args.State & DrawItemState.Focus) != 0) args.DrawFocusRectangle();
     }
 }

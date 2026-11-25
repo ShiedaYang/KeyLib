@@ -115,6 +115,11 @@ public sealed class VaultEntry
     internal VaultEntry Copy() { return (VaultEntry)MemberwiseClone(); }
     public override string ToString() { return Name ?? ""; }
 
+    internal static IOrderedEnumerable<VaultEntry> QuickFillOrder(IEnumerable<VaultEntry> matches)
+    {
+        return matches.OrderBy(entry => entry.Name, StringComparer.CurrentCultureIgnoreCase);
+    }
+
     internal void Validate()
     {
         Guid id;
@@ -301,6 +306,22 @@ internal sealed class VaultSession : IDisposable
     internal void Remove(string id)
     {
         Commit(Entries.Where(item => item.Id != id).Select(item => item.Copy()).ToList());
+    }
+
+    internal void UpdateAppHash(string path, string hash)
+    {
+        if (string.IsNullOrEmpty(path) || string.IsNullOrEmpty(hash) || hash.Length != 64 || hash.Any(c => !Uri.IsHexDigit(c)))
+            throw new ArgumentException("应用校验值无效。");
+        var next = Entries.Select(item => item.Copy()).ToList();
+        bool changed = false;
+        foreach (VaultEntry entry in next)
+        {
+            if (!string.Equals(entry.AppPath, path, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(entry.AppHash, hash, StringComparison.OrdinalIgnoreCase)) continue;
+            entry.AppHash = hash;
+            changed = true;
+        }
+        if (changed) Commit(next);
     }
 
     internal int Merge(List<VaultEntry> incoming)

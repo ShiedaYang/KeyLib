@@ -9,21 +9,25 @@
 </head>
 <body>
   <header>
-    <svg width="34" height="34" viewBox="0 0 34 34" aria-hidden="true">
-      <rect width="34" height="34" rx="9" fill="#1654c2"></rect>
-      <path d="M11 9v16m0-6L22 9m-7 6 8 10" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"/>
-    </svg>
+    <img class="brand-mark" src="icons/keylib-48.png" width="36" height="36" alt="">
     <div><h1>KeyLib</h1><p id="site"></p></div><kbd>Alt+C</kbd>
   </header>
   <p id="shortcutNotice" role="status" hidden></p>
   <p id="status" role="status">正在确认当前页面…</p>
   <main hidden id="main">
-    <section id="accounts" aria-label="匹配账号"></section>
-    <p id="keyboardHint" hidden>回车填写首个账号，Esc 关闭。</p>
-    <nav aria-label="其他操作">
-      <button id="openSave" type="button">快速保存</button>
-      <button id="openGenerator" type="button">随机密码</button>
-    </nav>
+    <div id="overview">
+      <h2 id="matches" hidden>匹配账号<span id="matchCount"></span></h2>
+      <section id="accounts" aria-labelledby="matches"></section>
+      <p id="noMatches" hidden>这个网站还没有保存的账号。</p>
+      <nav aria-label="其他操作">
+        <button id="openSave" type="button">快速保存</button>
+        <button id="openGenerator" type="button">随机密码</button>
+      </nav>
+    </div>
+    <div id="panelHeading" hidden>
+      <h2 id="panelTitle"></h2>
+      <button id="back" type="button">返回账号</button>
+    </div>
     <form id="saveForm" hidden>
       <label>用户名<input id="user" autocomplete="off" maxlength="512"></label>
       <label>密码<input type="password" id="password" autocomplete="off" required maxlength="2048"></label>
@@ -32,7 +36,14 @@
         <button class="primary" type="submit">加密保存</button>
       </div>
     </form>
-    <section id="generator" hidden>
+    <section id="updateConfirm" aria-labelledby="panelTitle" hidden>
+      <p>这个网站已有同名账号。要用刚输入的密码更新它吗？</p>
+      <div class="actions">
+        <button id="cancelUpdate" type="button">返回修改</button>
+        <button id="confirmUpdate" class="primary" type="button">更新密码</button>
+      </div>
+    </section>
+    <section id="generator" aria-labelledby="panelTitle" hidden>
       <div class="generator-options">
         <label>长度<input id="length" type="number" min="12" max="96" value="24"></label>
         <label class="checked"><input id="symbols" type="checkbox" checked>包含符号</label>

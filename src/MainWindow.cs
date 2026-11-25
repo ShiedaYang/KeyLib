@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -8,18 +9,28 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
-internal sealed class MainWindow : SoftWindow
+internal sealed class MainWindow : SoftWindow, IMessageFilter
 {
     internal const string Shortcut = "Alt+C";
     private const int HotkeyId = 301;
+    private const int WindowWidth = 1080;
+    private const int WindowHeight = 640;
+    private const int RailWidth = 174;
+    private const int PageInset = 22;
     private readonly string vaultPath;
     private readonly string bridgePath;
-    private readonly Panel content;
+    private readonly FocusPanel content;
     private readonly Label status;
     private readonly Label activeShortcut;
+    private readonly Panel brandHeader;
+    private readonly Panel railFooter;
+    private readonly Panel footerLine;
+    private readonly Label viewTitle;
+    private readonly SoftButton addAccount;
     private readonly Icon brandIcon;
+    private readonly Icon trayBrandIcon;
     private readonly NotifyIcon trayIcon;
-    private readonly ContextMenuStrip trayMenu;
+    private readonly SoftMenu trayMenu;
     private readonly Timer idle;
     private readonly Native.ForegroundCallback foregroundCallback;
     private IntPtr hook;
@@ -39,54 +50,84 @@ internal sealed class MainWindow : SoftWindow
     private Task<AppCatalog> pendingCatalog;
     private DateTime catalogReadAt;
     private readonly Dictionary<string, InstalledApp> autoLinks = new Dictionary<string, InstalledApp>();
+    private readonly AppIconCache appIcons = new AppIconCache();
     private readonly Dictionary<string, string> autoFingerprints = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<uint, long> shownProcesses = new Dictionary<uint, long>();
     private IntPtr observedForeground;
     private DateTime checkForegroundAt;
-    private ListBox list;
+    private SoftListBox list;
+    private SoftListFrame accountRows;
     private TextBox search;
     private Panel details;
+    private Panel accountTable;
+    private Label sourceColumn;
     private Label resultCount;
+    private Label emptyResults;
+    private SoftButton clearSearch;
+    private Label passwordValue;
+    private SoftButton revealPassword;
+    private EntryEditor inlineEditor;
+    private bool creatingEntry;
+    private DesktopTarget inlineTarget;
+    private bool refreshingEntries;
+    private bool detailsOpen;
+    private const string MaskedPassword = "••••••••••••";
 
     internal MainWindow(string directory)
     {
         vaultPath = Path.Combine(directory, "vault.softvault");
         bridgePath = Path.Combine(directory, "browser-host.json");
-        ClientSize = new Size(1042, 632);
+        SetContentSize(WindowWidth, WindowHeight);
         StartPosition = FormStartPosition.CenterScreen;
         Text = "KeyLib · 本地密码库";
-        brandIcon = BrandMark.CreateIcon();
+        brandIcon = BrandMark.CreateIcon(SystemInformation.IconSize);
+        trayBrandIcon = BrandMark.CreateIcon(SystemInformation.SmallIconSize);
         Icon = brandIcon;
-        trayMenu = new ContextMenuStrip();
-        trayMenu.Items.Add("打开 KeyLib", null, (sender, args) => ShowMain());
-        trayMenu.Items.Add("锁定密码库", null, (sender, args) => Lock("密码库已锁定。"));
+        trayMenu = new SoftMenu();
+        trayMenu.Add("打开 KeyLib", ShowMain);
+        trayMenu.Add("锁定密码库", () => Lock("密码库已锁定。"));
         trayMenu.Items.Add(new ToolStripSeparator());
-        trayMenu.Items.Add("退出 KeyLib", null, (sender, args) => ExitApplication());
-        trayIcon = new NotifyIcon { Icon = brandIcon, Text = "KeyLib", ContextMenuStrip = trayMenu };
+        trayMenu.Add("退出 KeyLib", ExitApplication);
+        trayIcon = new NotifyIcon { Icon = trayBrandIcon, Text = "KeyLib", ContextMenuStrip = trayMenu, Visible = true };
         trayIcon.MouseClick += delegate(object sender, MouseEventArgs args)
         {
             if (args.Button == MouseButtons.Left) ShowMain();
         };
 
-        var header = new Panel { Bounds = new Rectangle(0, 0, ClientSize.Width, 70) };
-        var mark = new BrandMark { Bounds = new Rectangle(25, 18, 36, 36) };
-        var heading = Theme.Label("KeyLib", 69, 15, 210, 41, Theme.Heading, Theme.Ink);
-        header.Controls.Add(mark);
-        header.Controls.Add(heading);
+        var header = new Panel { Bounds = new Rectangle(1, 1, WindowWidth - 2, 71), BackColor = Theme.Surface };
+        brandHeader = new Panel { Bounds = new Rectangle(0, 0, RailWidth, header.Height), BackColor = Theme.Sidebar };
+        var mark = new BrandMark { Bounds = new Rectangle(17, 19, 34, 34) };
+        var heading = Theme.Label("KeyLib", 58, 16, 109, 40, Theme.Heading, Theme.Ink);
+        brandHeader.Controls.Add(mark);
+        brandHeader.Controls.Add(heading);
+        header.Controls.Add(brandHeader);
+        viewTitle = Theme.Label("", RailWidth + PageInset, 13, 440, 48, Theme.Heading, Theme.Ink);
+        header.Controls.Add(viewTitle);
+        addAccount = AddAction(header, "新建账号", 863, 18, 119, true, () => Edit(null, null, null));
+        addAccount.LeadingIcon = "plus";
         MakeDraggable(header);
+        MakeDraggable(brandHeader);
         MakeDraggable(mark);
         MakeDraggable(heading);
+        MakeDraggable(viewTitle);
         AddWindowButtons(true, parent: header);
-        activeShortcut = Theme.Label("快捷键  " + Shortcut, 720, 18, 230, 35, Theme.BodyBold, Theme.Muted);
+        activeShortcut = Theme.Label("快捷键  " + Shortcut, 645, 18, 201, 35, Theme.Small, Theme.Muted);
         activeShortcut.TextAlign = ContentAlignment.MiddleRight;
         header.Controls.Add(activeShortcut);
         MakeDraggable(activeShortcut);
-        Controls.Add(header);
-        Controls.Add(new Panel { Bounds = new Rectangle(0, 70, 1042, 1), BackColor = Theme.Line });
-        content = new Panel { Bounds = new Rectangle(20, 89, 1002, 486) };
+        AddEdgePanel(header);
+        Controls.Add(new Panel { Bounds = new Rectangle(1, 72, WindowWidth - 2, 1), BackColor = Theme.Line });
+        content = new FocusPanel { Bounds = new Rectangle(1, 73, WindowWidth - 2, 527) };
         Controls.Add(content);
-        Controls.Add(new Panel { Bounds = new Rectangle(20, 592, 1002, 1), BackColor = Theme.Line });
-        status = Theme.Label("", 24, 597, 994, 29, Theme.Small, Theme.Muted);
+        railFooter = new Panel { Bounds = new Rectangle(1, 600, RailWidth, 39), BackColor = Theme.Sidebar };
+        railFooter.Controls.Add(new Panel { Bounds = new Rectangle(RailWidth - 1, 0, 1, railFooter.Height), BackColor = Theme.Line });
+        railFooter.Controls.Add(new Panel { Bounds = new Rectangle(14, 1, RailWidth - 28, 1), BackColor = Theme.Line });
+        var lockVault = NavigationButton(railFooter, "锁定密码库", "lock", 3, () => Lock("密码库已锁定。"));
+        lockVault.Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
+        AddEdgePanel(railFooter);
+        footerLine = new Panel { Bounds = new Rectangle(RailWidth + PageInset, 601, WindowWidth - RailWidth - 2 * PageInset, 1), BackColor = Theme.Line };
+        Controls.Add(footerLine);
+        status = Theme.Label("", RailWidth + PageInset, 607, WindowWidth - RailWidth - 2 * PageInset, 25, Theme.Small, Theme.Muted);
         Controls.Add(status);
         idle = new Timer { Interval = 100 };
         idle.Tick += delegate
@@ -101,12 +142,14 @@ internal sealed class MainWindow : SoftWindow
         };
         foregroundCallback = ForegroundChanged;
         Shown += OnStart;
+        Deactivate += delegate { HidePassword(); };
         FormClosing += delegate(object sender, FormClosingEventArgs args)
         {
             if (args.CloseReason == CloseReason.UserClosing && !quitRequested)
             {
                 args.Cancel = true;
                 CancelPopup();
+                HidePassword();
                 trayIcon.Visible = true;
                 Hide();
                 return;
@@ -129,6 +172,7 @@ internal sealed class MainWindow : SoftWindow
 
     private void OnStart(object sender, EventArgs args)
     {
+        Application.AddMessageFilter(this);
         popupInput = new PopupInput(Handle);
         hook = Native.SetWinEventHook(3, 3, IntPtr.Zero, foregroundCallback, 0, 0, 0);
         idle.Start();
@@ -143,7 +187,7 @@ internal sealed class MainWindow : SoftWindow
         LoadCatalogInBackground();
     }
 
-    internal void ExitApplication()
+    private void ExitApplication()
     {
         quitRequested = true;
         Close();
@@ -154,12 +198,15 @@ internal sealed class MainWindow : SoftWindow
         bool releaseTray = disposing && !IsDisposed;
         if (releaseTray && trayIcon != null)
         {
+            Application.RemoveMessageFilter(this);
             trayIcon.Visible = false;
             trayIcon.Dispose();
             trayMenu.Dispose();
         }
         base.Dispose(disposing);
         if (releaseTray && brandIcon != null) brandIcon.Dispose();
+        if (releaseTray && trayBrandIcon != null) trayBrandIcon.Dispose();
+        if (releaseTray) appIcons.Clear();
     }
 
     private void QueueLock(string reason)
@@ -216,33 +263,92 @@ internal sealed class MainWindow : SoftWindow
             if (!popupInput.IsReleasedMessage(action) && popup != null && popup.Token == message.LParam.ToInt32())
             {
                 if (action == PopupInput.Cancel) CancelPopup();
-                else if (action == PopupInput.Confirm && !popup.Busy) popup.View.ConfirmSelection();
+                else if (!popup.Busy && Native.GetForegroundWindow() == popup.TargetWindow)
+                {
+                    if (action == PopupInput.Confirm) popup.View.ConfirmSelection();
+                    else if (action == PopupInput.Previous) popup.View.MoveSelection(-1);
+                    else if (action == PopupInput.Next) popup.View.MoveSelection(1);
+                }
             }
         }
         base.WndProc(ref message);
     }
 
+    protected override bool ProcessCmdKey(ref Message message, Keys keyData)
+    {
+        if (inlineEditor != null && keyData == Keys.Escape)
+        {
+            CancelInlineEdit();
+            return true;
+        }
+        if (search != null && keyData == (Keys.Control | Keys.F))
+        {
+            search.Focus();
+            search.SelectAll();
+            return true;
+        }
+        if (search != null && search.Focused)
+        {
+            if (keyData == Keys.Escape && search.TextLength > 0)
+            {
+                search.Clear();
+                return true;
+            }
+            if ((keyData == Keys.Down || keyData == Keys.Enter) && list.Items.Count > 0)
+            {
+                list.Focus();
+                return true;
+            }
+        }
+        if (list != null && list.Focused && keyData == Keys.Enter)
+        {
+            OpenDetails();
+            return true;
+        }
+        if (detailsOpen && keyData == Keys.Escape)
+        {
+            CloseDetails();
+            return true;
+        }
+        return base.ProcessCmdKey(ref message, keyData);
+    }
+
     private void ClearContent()
     {
-        AcceptButton = null;
+        EndInlineEdit();
         while (content.Controls.Count > 0) content.Controls[0].Dispose();
         list = null;
+        accountRows = null;
         search = null;
-        details = null;
+        accountTable = details = null;
+        sourceColumn = null;
+        detailsOpen = false;
         resultCount = null;
+        emptyResults = passwordValue = null;
+        clearSearch = revealPassword = null;
     }
 
     private void RenderLocked()
     {
         ClearContent();
+        brandHeader.Visible = railFooter.Visible = addAccount.Visible = footerLine.Visible = false;
+        viewTitle.Text = "";
+        content.BackColor = Theme.Sidebar;
+        status.TextAlign = ContentAlignment.MiddleCenter;
         bool create = !File.Exists(vaultPath);
-        var heading = Theme.Label(create ? "创建本地密码库" : "解锁密码库", 299, 60, 415, 43, Theme.Heading, Theme.Ink);
-        content.Controls.Add(heading);
-        content.Controls.Add(Theme.Label(create ? "设置至少 12 个字符的主密码。请妥善保管它。" :
-            "输入主密码，查看已加密的账号。", 299, 110, 416, 32, Theme.Body, Theme.Muted));
-        var first = AddInput(content, "主密码", 299, 160, 405, 256, true);
-        TextBox confirmation = create ? AddInput(content, "确认主密码", 299, 233, 405, 256, true) : null;
-        var unlock = AddAction(content, create ? "创建密码库" : "解锁", 299, create ? 318 : 244, 405, true, async () =>
+        var logo = new BrandMark { Bounds = new Rectangle((WindowWidth - 52) / 2, 44, 52, 52) };
+        var name = Theme.Label("KeyLib", (WindowWidth - 240) / 2, 94, 240, 40, Theme.Heading, Theme.Ink);
+        name.TextAlign = ContentAlignment.MiddleCenter;
+        content.Controls.Add(logo);
+        content.Controls.Add(name);
+        var form = Theme.FramedPanel(new Rectangle((WindowWidth - 416) / 2, 155, 416, create ? 319 : 247), Theme.Surface);
+        content.Controls.Add(form);
+        form.Controls.Add(Theme.Label(create ? "创建本地密码库" : "解锁密码库", 28, 18, 360, 36, Theme.Subheading, Theme.Ink));
+        form.Controls.Add(Theme.Label(create ? "设置至少 12 个字符的主密码。请妥善保管它。" :
+            "输入主密码，查看已加密的账号。", 28, 57, 360, 28, Theme.Body, Theme.Muted));
+        var first = AddInput(form, "主密码", 28, 96, 360, 256, true);
+        TextBox confirmation = create ? AddInput(form, "确认主密码", 28, 168, 360, 256, true) : null;
+        var unlock = AddAction(form, create ? "创建密码库" : "解锁", 28, create ? 252 : 180, 360, true, async () =>
         {
             if (first.Text.Length == 0) { Status("请输入主密码。"); return; }
             if (confirmation != null && first.Text != confirmation.Text) { Status("两次主密码不一致。"); return; }
@@ -273,122 +379,339 @@ internal sealed class MainWindow : SoftWindow
     private void RenderVault()
     {
         ClearContent();
-        var navigation = new Panel { Bounds = new Rectangle(0, 0, 188, 486), BackColor = Theme.Sidebar };
+        content.BackColor = Theme.Surface;
+        brandHeader.Visible = railFooter.Visible = addAccount.Visible = footerLine.Visible = true;
+        viewTitle.Text = "全部账号";
+        status.TextAlign = ContentAlignment.MiddleLeft;
+        var navigation = new Panel { Bounds = new Rectangle(0, 0, RailWidth, content.Height), BackColor = Theme.Sidebar };
         content.Controls.Add(navigation);
-        navigation.Controls.Add(Theme.Label("密码库", 14, 11, 150, 29, Theme.BodyBold, Theme.Ink));
-        var all = NavigationButton(navigation, "全部账号", 49, () => { search.Focus(); RefreshEntries(); });
-        all.Current = true;
-        navigation.Controls.Add(new Panel { Bounds = new Rectangle(14, 102, 160, 1), BackColor = Theme.Line });
-        NavigationButton(navigation, "随机密码", 118, ShowGenerator);
-        NavigationButton(navigation, "加密备份", 159, () =>
+        navigation.Controls.Add(new Panel { Bounds = new Rectangle(RailWidth - 1, 0, 1, navigation.Height), BackColor = Theme.Line });
+        NavigationButton(navigation, "密码库", "vault", 13, () =>
+        {
+            if (detailsOpen) CloseDetails();
+            if (!detailsOpen) FocusBackground();
+        }).Current = true;
+        navigation.Controls.Add(Theme.Label("工具", 20, 82, 135, 24, Theme.Small, Theme.Muted));
+        NavigationButton(navigation, "随机密码", "generator", 109, ShowGenerator);
+        NavigationButton(navigation, "加密备份", "backup", 150, () =>
         {
             if (vault == null) return;
             using (var dialog = new BackupDialog(vault)) dialog.ShowDialog(this);
             if (vault != null) { RebuildAutoLinks(); RefreshEntries(); }
         });
-        NavigationButton(navigation, "设置", 200, ShowSettings);
-        NavigationButton(navigation, "锁定", 437, () => Lock("密码库已锁定。"));
+        NavigationButton(navigation, "设置", "settings", 217, ShowSettings);
 
-        content.Controls.Add(Theme.Label("全部账号", 211, 0, 230, 36, Theme.Subheading, Theme.Ink));
-        AddAction(content, "新建账号", 483, 2, 102, true, () => Edit(null, null, null));
-        search = AddInput(content, "搜索账号", 211, 48, 374, 180, false);
-        search.TextChanged += delegate { RefreshEntries(); };
-        resultCount = Theme.Label("", 211, 110, 374, 26, Theme.Small, Theme.Muted);
-        content.Controls.Add(resultCount);
-        list = new ListBox { Bounds = new Rectangle(211, 143, 374, 343), Font = Theme.Body, BackColor = Theme.Surface,
-            ForeColor = Theme.Ink, BorderStyle = BorderStyle.None, DrawMode = DrawMode.OwnerDrawFixed, ItemHeight = 59,
+        int tableLeft = RailWidth + PageInset;
+        accountTable = Theme.FramedPanel(new Rectangle(tableLeft, 17, WindowWidth - PageInset - tableLeft, content.Height - 32), Theme.Surface);
+        content.Controls.Add(accountTable);
+        AddFilterSearch(accountTable);
+        resultCount = Theme.Label("", accountTable.Width - 130, 14, 112, 36, Theme.Small, Theme.Muted);
+        resultCount.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+        resultCount.TextAlign = ContentAlignment.MiddleRight;
+        accountTable.Controls.Add(resultCount);
+        var columns = new Panel { Bounds = new Rectangle(1, 64, accountTable.Width - 2, 34), BackColor = Theme.Sidebar,
+            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right };
+        columns.Controls.Add(Theme.Label("名称", 52, 0, 76, 34, Theme.BodyBold, Theme.Ink));
+        sourceColumn = Theme.Label("网站 / 应用", 0, 0, 116, 34, Theme.BodyBold, Theme.Ink);
+        columns.Controls.Add(sourceColumn);
+        accountTable.Controls.Add(columns);
+        list = new SoftListBox { Bounds = new Rectangle(1, 98, accountTable.Width - 2, accountTable.Height - 99), Font = Theme.Body,
+            BackColor = Theme.Surface, ForeColor = Theme.Ink, BorderStyle = BorderStyle.None,
+            Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
+            DrawMode = DrawMode.OwnerDrawFixed, ItemHeight = 57,
             IntegralHeight = false, AccessibleName = "账号列表" };
         list.DrawItem += DrawEntry;
-        list.SelectedIndexChanged += delegate { RenderDetails(); };
-        list.DoubleClick += delegate { EditSelected(); };
-        content.Controls.Add(list);
+        list.SelectedIndexChanged += delegate { if (!refreshingEntries) RenderDetails(); };
+        list.MouseUp += OnEntryMouseUp;
+        list.MouseMove += delegate(object sender, MouseEventArgs args)
+        {
+            list.Cursor = list.IndexFromPoint(args.Location) == ListBox.NoMatches ? Cursors.Default : Cursors.Hand;
+        };
+        list.GotFocus += delegate { list.Invalidate(); };
+        list.LostFocus += delegate { list.Invalidate(); };
+        accountRows = new SoftListFrame(list);
+        accountTable.Controls.Add(accountRows);
+        emptyResults = Theme.Label("", 18, 111, accountTable.Width - 36, 56, Theme.Body, Theme.Muted);
+        emptyResults.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+        accountTable.Controls.Add(emptyResults);
 
-        content.Controls.Add(new Panel { Bounds = new Rectangle(608, 2, 1, 483), BackColor = Theme.Line });
-        details = new Panel { Bounds = new Rectangle(631, 0, 371, 486) };
+        details = Theme.FramedPanel(new Rectangle(WindowWidth - PageInset - 364, 17, 364, accountTable.Height), Theme.Surface);
+        details.Visible = false;
         content.Controls.Add(details);
+        LayoutAccountTable();
         RefreshEntries();
+        FocusBackground();
     }
 
-    private static SoftButton NavigationButton(Control parent, string caption, int top, Action action)
+    private void AddFilterSearch(Panel toolbar)
     {
-        var button = AddAction(parent, caption, 9, top, 170, false, action);
+        var field = new SoftInputFrame { Bounds = new Rectangle(16, 14, 310, 36), FillColor = Theme.Surface };
+        toolbar.Controls.Add(field);
+        field.Paint += delegate(object sender, PaintEventArgs args)
+        {
+            Theme.DrawIcon(args.Graphics, "search", new Rectangle(8, 11, 14, 14), Theme.Muted);
+        };
+        search = new SoftTextBox { Bounds = new Rectangle(27, 8, field.Width - 56, 23), Font = Theme.Body,
+            BorderStyle = BorderStyle.None, MaxLength = 180, ForeColor = Theme.Ink, BackColor = Theme.Surface,
+            AccessibleName = "搜索账号" };
+        search.HandleCreated += delegate { SetCueBanner(search.Handle, 0x1501, IntPtr.Zero, "搜索账号"); };
+        search.GotFocus += delegate { field.Invalidate(); };
+        search.LostFocus += delegate { field.Invalidate(); };
+        field.Controls.Add(search);
+        clearSearch = new SoftButton("清除搜索", false, "cross") { Bounds = new Rectangle(field.Width - 28, 5, 25, 26) };
+        clearSearch.Click += delegate { search.Clear(); search.Focus(); };
+        field.Controls.Add(clearSearch);
+        search.TextChanged += delegate { RefreshEntries(); };
+        field.MouseDown += delegate { search.Focus(); };
+    }
+
+    private static SoftButton NavigationButton(Control parent, string caption, string icon, int top, Action action)
+    {
+        var button = AddAction(parent, caption, 9, top, parent.ClientSize.Width - 18, false, action);
         button.Navigation = true;
+        button.LeadingIcon = icon;
         return button;
     }
 
-    private void RefreshEntries()
+    private void OnEntryMouseUp(object sender, MouseEventArgs args)
+    {
+        if (args.Button != MouseButtons.Left) return;
+        int index = list.IndexFromPoint(args.Location);
+        if (index == ListBox.NoMatches || !list.GetItemRectangle(index).Contains(args.Location)) return;
+        list.SelectedIndex = index;
+        OpenDetails();
+    }
+
+    bool IMessageFilter.PreFilterMessage(ref Message message)
+    {
+        const int leftButtonDown = 0x0201;
+        if (message.Msg != leftButtonDown || vault == null || details == null) return false;
+        Control clicked = Control.FromHandle(message.HWnd);
+        if (clicked == null || clicked.FindForm() != this || clicked == details || details.Contains(clicked))
+            return false;
+
+        if (clicked == list)
+        {
+            int packed = message.LParam.ToInt32();
+            var point = new Point(unchecked((short)packed), unchecked((short)(packed >> 16)));
+            int row = list.IndexFromPoint(point);
+            if (row >= 0 && list.GetItemRectangle(row).Contains(point)) return false;
+        }
+        else if (!(clicked is Panel) && !(clicked is Label) && clicked != this)
+            return false;
+
+        if (detailsOpen) CloseDetails();
+        else FocusBackground();
+        // Prevent the native list box from focusing and selecting its last row on a blank click.
+        return clicked == list;
+    }
+
+    private void OpenDetails()
+    {
+        if (list.SelectedIndex < 0) return;
+        detailsOpen = true;
+        details.Visible = true;
+        LayoutAccountTable();
+        RenderDetails();
+    }
+
+    private void CloseDetails()
+    {
+        if (inlineEditor != null && inlineEditor.HasChanges)
+        {
+            inlineEditor.ShowError("请先保存或取消修改。");
+            return;
+        }
+        EndInlineEdit();
+        detailsOpen = false;
+        details.Visible = false;
+        LayoutAccountTable();
+        RenderDetails();
+        FocusBackground();
+    }
+
+    private void FocusBackground()
+    {
+        ActiveControl = content;
+        content.Focus();
+    }
+
+    private void LayoutAccountTable()
+    {
+        int right = detailsOpen ? details.Left - 15 : content.ClientSize.Width - PageInset;
+        accountTable.Width = right - accountTable.Left;
+        AlignAccountColumns();
+        sourceColumn.Visible = !detailsOpen;
+        list.Invalidate();
+    }
+
+    private void AlignAccountColumns()
+    {
+        sourceColumn.Left = SourceColumnX(list.ClientSize.Width);
+    }
+
+    private static int SourceColumnX(int tableWidth) { return tableWidth * 59 / 100; }
+
+    private void RefreshEntries(string selectedId = null)
     {
         if (list == null || vault == null) return;
-        string term = search.Text.Trim();
-        var previous = list.SelectedItem as VaultEntry;
+        string[] terms = search.Text.Split((char[])null, StringSplitOptions.RemoveEmptyEntries);
+        if (selectedId == null && list.SelectedItem is VaultEntry)
+            selectedId = ((VaultEntry)list.SelectedItem).Id;
+        int selectedIndex = -1;
+        refreshingEntries = true;
         list.BeginUpdate();
         try
         {
             list.Items.Clear();
             foreach (VaultEntry entry in vault.Entries.OrderBy(item => item.Name, StringComparer.CurrentCultureIgnoreCase))
             {
-                if (!Contains(entry.Name, term) && !Contains(entry.User, term) &&
-                    !Contains(entry.Origin, term) && !Contains(entry.AppPath, term) &&
-                    !Contains(entry.Notes, term)) continue;
+                if (!MatchesSearch(entry, terms)) continue;
                 int added = list.Items.Add(entry);
-                if (previous != null && previous.Id == entry.Id) list.SelectedIndex = added;
+                if (selectedId == entry.Id) selectedIndex = added;
             }
-            if (list.Items.Count > 0 && list.SelectedIndex < 0) list.SelectedIndex = 0;
+            if (list.Items.Count > 0) list.SelectedIndex = Math.Max(selectedIndex, 0);
         }
-        finally { list.EndUpdate(); }
+        finally
+        {
+            list.EndUpdate();
+            refreshingEntries = false;
+        }
+        clearSearch.Visible = search.TextLength > 0;
         resultCount.Text = list.Items.Count + " 个账号";
-        RenderDetails();
+        bool empty = list.Items.Count == 0;
+        accountRows.Visible = !empty;
+        accountRows.UpdateScroll();
+        AlignAccountColumns();
+        emptyResults.Visible = empty;
+        if (empty)
+            emptyResults.Text = terms.Length > 0 ? "没有匹配结果。试试其他关键词。" :
+                "新建账号，或在目标应用里按 Alt+C 快速保存。";
+        if (empty && detailsOpen && inlineEditor == null) CloseDetails();
+        else RenderDetails();
+    }
+
+    private bool MatchesSearch(VaultEntry entry, string[] terms)
+    {
+        if (terms.Length == 0) return true;
+        string app = AppDisplayName(entry);
+        return terms.All(term => Contains(entry.Name, term) || Contains(entry.User, term) ||
+            Contains(entry.Origin, term) || Contains(entry.AppPath, term) ||
+            Contains(entry.Notes, term) || Contains(app, term));
+    }
+
+    private string AppDisplayName(VaultEntry entry)
+    {
+        if (!string.IsNullOrEmpty(entry.AppPath))
+        {
+            InstalledApp bound = catalog.ByPath(entry.AppPath);
+            return bound == null ? Path.GetFileName(entry.AppPath) : bound.Name;
+        }
+        InstalledApp match;
+        return autoLinks.TryGetValue(entry.Id, out match) ? match.Name : "";
     }
 
     private void RenderDetails()
     {
         if (details == null || list == null) return;
-        while (details.Controls.Count > 0) details.Controls[0].Dispose();
-        VaultEntry entry = list.SelectedItem as VaultEntry;
-        if (entry == null)
+        if (inlineEditor != null)
         {
-            details.Controls.Add(Theme.Label("账号详情", 0, 0, 300, 36, Theme.Subheading, Theme.Ink));
-            string empty = vault != null && vault.Entries.Count == 0
-                ? "新建账号，或在目标应用里按 Alt+C 快速保存。"
-                : "这个视图没有匹配的账号。";
-            details.Controls.Add(Theme.Label(empty, 0, 53, 355, 46, Theme.Body, Theme.Muted));
+            inlineEditor.UpdateCatalog(catalog);
             return;
         }
+        ClearDetailControls();
+        if (!detailsOpen) return;
+        VaultEntry entry = list.SelectedItem as VaultEntry;
+        if (entry == null) return;
 
-        var name = Theme.Label(entry.Name, 0, 0, 370, 37, Theme.Subheading, Theme.Ink);
-        name.AutoEllipsis = true;
-        details.Controls.Add(name);
-        details.Controls.Add(new Panel { Bounds = new Rectangle(0, 79, 370, 1), BackColor = Theme.Line });
-        AddDetail("用户名", entry.User, 95);
-        Label password = AddDetail("密码", "••••••••••••", 155, 263);
-        SoftButton reveal = null;
-        reveal = AddAction(details, "显示", 285, 169, 85, false, () =>
+        int innerWidth = details.ClientSize.Width - 32;
+        int footerTop = details.ClientSize.Height - 54;
+        RenderDetailHeading(entry.Name);
+
+        var credentials = new Panel { Bounds = new Rectangle(16, 77, innerWidth, 130), BackColor = Theme.Sidebar };
+        details.Controls.Add(credentials);
+        AddDetail(credentials, "用户名", entry.User, 12, 8, innerWidth - 24);
+        credentials.Controls.Add(new Panel { Bounds = new Rectangle(12, 62, innerWidth - 24, 1), BackColor = Theme.Line });
+        passwordValue = AddDetail(credentials, "密码", MaskedPassword, 12, 73, innerWidth - 116);
+        revealPassword = AddAction(credentials, "显示", innerWidth - 82, 83, 70, false, () =>
         {
-            bool masked = reveal.Text == "显示";
-            password.Text = masked ? entry.Password : "••••••••••••";
-            reveal.Text = masked ? "隐藏" : "显示";
-            reveal.AccessibleName = reveal.Text;
+            if (revealPassword.Text == "隐藏") { HidePassword(); return; }
+            passwordValue.Text = entry.Password;
+            revealPassword.Text = "隐藏";
+            revealPassword.AccessibleName = "隐藏密码";
         });
-        int y = 215;
-        if (!string.IsNullOrEmpty(entry.Origin)) { AddDetail("网站", entry.Origin, y); y += 57; }
-        if (!string.IsNullOrEmpty(entry.AppPath)) { AddDetail("绑定应用", Path.GetFileName(entry.AppPath), y); y += 57; }
-        else
+        revealPassword.AccessibleName = "显示密码";
+        int y = 224;
+        if (!string.IsNullOrEmpty(entry.Origin)) { AddDetail(details, "网站", entry.Origin, 16, y, innerWidth); y += 52; }
+        string app = AppDisplayName(entry);
+        if (app.Length > 0)
         {
-            InstalledApp automatic;
-            if (autoLinks.TryGetValue(entry.Id, out automatic)) { AddDetail("备注匹配应用", automatic.Name, y); y += 57; }
+            AddApplicationDetail(entry, app, y, innerWidth);
+            y += 84;
         }
-        if (!string.IsNullOrEmpty(entry.Notes)) AddDetail("备注", entry.Notes.Replace('\r', ' ').Replace('\n', ' '), y);
-        AddAction(details, "编辑账号", 0, 432, 109, true, EditSelected);
-        AddAction(details, "删除", 121, 432, 76, false, RemoveSelected);
+        if (!string.IsNullOrWhiteSpace(entry.Notes))
+        {
+            int height = Math.Min(94, footerTop - y - 32);
+            details.Controls.Add(Theme.Label("备注", 16, y, innerWidth, 21, Theme.Small, Theme.Muted));
+            details.Controls.Add(new SoftNoteFrame(new Rectangle(16, y + 23, innerWidth, height), entry.Notes));
+        }
+        details.Controls.Add(new Panel { Bounds = new Rectangle(1, footerTop, details.Width - 2, 1), BackColor = Theme.Line });
+        const int actionGap = 12;
+        int actionWidth = (innerWidth - actionGap) / 2;
+        var edit = AddAction(details, "编辑", 16, footerTop + 10, actionWidth, true, EditSelected);
+        edit.AccessibleName = "编辑账号";
+        var delete = AddAction(details, "删除", 16 + actionWidth + actionGap, footerTop + 10,
+            innerWidth - actionWidth - actionGap, false, RemoveSelected);
+        delete.AccessibleName = "删除账号";
+        delete.Destructive = true;
     }
 
-    private Label AddDetail(string label, string value, int top, int width = 370)
+    private void HidePassword()
     {
-        details.Controls.Add(Theme.Label(label, 0, top, width, 21, Theme.Small, Theme.Muted));
-        var text = Theme.Label(string.IsNullOrEmpty(value) ? "—" : value, 0, top + 21, width, 27, Theme.Body, Theme.Ink);
+        if (inlineEditor != null) inlineEditor.HidePassword();
+        if (passwordValue == null) return;
+        passwordValue.Text = MaskedPassword;
+        revealPassword.Text = "显示";
+        revealPassword.AccessibleName = "显示密码";
+    }
+
+    private static Label AddDetail(Control parent, string label, string value, int x, int top, int width)
+    {
+        parent.Controls.Add(Theme.Label(label, x, top, width, 20, Theme.Small, Theme.Muted));
+        var text = Theme.Label(string.IsNullOrEmpty(value) ? "—" : value, x, top + 20, width, 26, Theme.Body, Theme.Ink);
         text.AutoEllipsis = true;
-        details.Controls.Add(text);
+        parent.Controls.Add(text);
         return text;
+    }
+
+    private void AddApplicationDetail(VaultEntry entry, string name, int top, int width)
+    {
+        string label = string.IsNullOrEmpty(entry.AppPath) ? "备注匹配应用" : "绑定应用";
+        details.Controls.Add(Theme.Label(label, 16, top, width, 20, Theme.Small, Theme.Muted));
+        var row = new SoftInputFrame
+        {
+            Bounds = new Rectangle(16, top + 23, width, 48), FillColor = Theme.Sidebar,
+            AccessibleName = label + "：" + name, AccessibleRole = AccessibleRole.Grouping
+        };
+        string path = LinkedAppPath(entry);
+        row.Paint += delegate(object sender, PaintEventArgs args)
+        {
+            var bounds = new Rectangle(12, 10, 28, 28);
+            Bitmap icon = appIcons.Get(path);
+            if (icon == null) Theme.DrawIcon(args.Graphics, "vault", bounds, Theme.Muted);
+            else
+            {
+                GraphicsState previous = args.Graphics.Save();
+                args.Graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                args.Graphics.PixelOffsetMode = PixelOffsetMode.Half;
+                args.Graphics.DrawImage(icon, bounds);
+                args.Graphics.Restore(previous);
+            }
+        };
+        var title = Theme.Label(name, 50, 0, width - 62, row.Height, Theme.BodyBold, Theme.Ink);
+        title.AutoEllipsis = true;
+        row.Controls.Add(title);
+        details.Controls.Add(row);
     }
 
     private static bool Contains(string value, string term)
@@ -396,83 +719,155 @@ internal sealed class MainWindow : SoftWindow
         return (value ?? "").IndexOf(term, StringComparison.CurrentCultureIgnoreCase) >= 0;
     }
 
-    private static void DrawEntry(object sender, DrawItemEventArgs e)
+    private void DrawEntry(object sender, DrawItemEventArgs e)
     {
         if (e.Index < 0) return;
         var entry = (VaultEntry)((ListBox)sender).Items[e.Index];
-        bool selected = (e.State & DrawItemState.Selected) != 0;
+        bool selected = (e.State & DrawItemState.Selected) != 0 && detailsOpen && !creatingEntry;
         using (var fill = new SolidBrush(selected ? Theme.TintHover : Theme.Surface))
             e.Graphics.FillRectangle(fill, e.Bounds);
-        int iconX = e.Bounds.X + 12, iconY = e.Bounds.Y + 12;
-        using (var tile = Theme.Rounded(new Rectangle(iconX, iconY, 34, 34), 8))
-        using (var fill = new SolidBrush(selected ? Theme.Surface : Theme.Tint))
-        using (var edge = new Pen(Theme.Accent, 1.4f))
+        Bitmap appIcon = appIcons.Get(LinkedAppPath(entry));
+        if (appIcon == null)
         {
-            e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-            e.Graphics.FillPath(fill, tile);
-            e.Graphics.DrawEllipse(edge, iconX + 8, iconY + 11, 10, 10);
-            e.Graphics.DrawLine(edge, iconX + 18, iconY + 16, iconX + 26, iconY + 16);
-            e.Graphics.DrawLine(edge, iconX + 24, iconY + 16, iconX + 24, iconY + 20);
+            Theme.DrawIcon(e.Graphics, "vault", new Rectangle(e.Bounds.X + 17, e.Bounds.Y + 18, 19, 19), Theme.Muted);
+        }
+        else
+        {
+            const int iconSize = 24;
+            GraphicsState previous = e.Graphics.Save();
+            e.Graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
+            e.Graphics.PixelOffsetMode = PixelOffsetMode.Half;
+            e.Graphics.DrawImage(appIcon, new Rectangle(e.Bounds.X + 14, e.Bounds.Y + (e.Bounds.Height - iconSize) / 2, iconSize, iconSize));
+            e.Graphics.Restore(previous);
         }
         using (var line = new Pen(Theme.Line))
-            e.Graphics.DrawLine(line, e.Bounds.Left + 56, e.Bounds.Bottom - 1, e.Bounds.Right - 2, e.Bounds.Bottom - 1);
-        int left = e.Bounds.X + 57;
-        int width = e.Bounds.Width - 68;
+            e.Graphics.DrawLine(line, e.Bounds.Left, e.Bounds.Bottom - 1, e.Bounds.Right, e.Bounds.Bottom - 1);
+        int left = e.Bounds.X + 51;
+        int source = e.Bounds.X + SourceColumnX(list.ClientSize.Width);
+        int nameEnd = detailsOpen ? e.Bounds.Right : source;
+        int width = nameEnd - left - 12;
         var flags = TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix;
-        TextRenderer.DrawText(e.Graphics, entry.Name, Theme.BodyBold, new Rectangle(left, e.Bounds.Y + 8, width, 23), Theme.Ink, flags);
-        string context = !string.IsNullOrEmpty(entry.Origin) ? entry.Origin :
-            !string.IsNullOrEmpty(entry.AppPath) ? Path.GetFileNameWithoutExtension(entry.AppPath) : "";
-        string subtitle = entry.User + (context.Length > 0 ? "  /  " + context : "");
-        TextRenderer.DrawText(e.Graphics, subtitle, Theme.Small, new Rectangle(left, e.Bounds.Y + 32, width, 18), Theme.Muted, flags);
-        if ((e.State & DrawItemState.Focus) != 0) e.DrawFocusRectangle();
+        TextRenderer.DrawText(e.Graphics, entry.Name, Theme.BodyBold, new Rectangle(left, e.Bounds.Y + 8, width, 23), Theme.Accent, flags);
+        TextRenderer.DrawText(e.Graphics, entry.User, Theme.Small, new Rectangle(left, e.Bounds.Y + 31, width, 18), Theme.Muted, flags);
+        if (!detailsOpen)
+        {
+            string context = !string.IsNullOrEmpty(entry.Origin) ? new Uri(entry.Origin).Authority : AppDisplayName(entry);
+            TextRenderer.DrawText(e.Graphics, context, Theme.Body, new Rectangle(source, e.Bounds.Y, Math.Max(0, e.Bounds.Right - source - 12), e.Bounds.Height),
+                Theme.Ink, flags);
+        }
+        if (list.Focused && (e.State & DrawItemState.Focus) != 0) e.DrawFocusRectangle();
     }
 
     private void EditSelected()
     {
         var entry = list == null ? null : list.SelectedItem as VaultEntry;
-        if (entry != null) Edit(entry, null, null);
-        else Status("请先选择账号。");
+        if (entry == null || vault == null) { Status("请先选择账号。"); return; }
+        if (inlineEditor != null) return;
+        Edit(entry, null, null);
+    }
+
+    private void ClearDetailControls()
+    {
+        revealPassword = null;
+        passwordValue = null;
+        while (details.Controls.Count > 0) details.Controls[0].Dispose();
+    }
+
+    private void RenderDetailHeading(string title)
+    {
+        int width = details.ClientSize.Width - 32;
+        var heading = Theme.Label(title, 16, 10, width - 35, 39, Theme.Subheading, Theme.Ink);
+        heading.AutoEllipsis = true;
+        details.Controls.Add(heading);
+        var close = new SoftButton("关闭账号详情", false, "cross") { Bounds = new Rectangle(width - 1, 14, 28, 30) };
+        close.Click += delegate { CloseDetails(); };
+        details.Controls.Add(close);
+        details.Controls.Add(new Panel { Bounds = new Rectangle(1, 60, details.Width - 2, 1), BackColor = Theme.Line });
+    }
+
+    private void SaveInlineEntry(VaultEntry entry)
+    {
+        if (vault == null || inlineEditor == null ||
+            (!creatingEntry && !vault.Entries.Any(saved => saved.Id == entry.Id)))
+            throw new InvalidOperationException("账号已不可用，请重新打开密码库。");
+        if (creatingEntry && inlineTarget != null)
+        {
+            var duplicate = vault.Entries.FirstOrDefault(item => DetectPath(item, inlineTarget.Path) && item.User == entry.User);
+            if (duplicate != null)
+            {
+                if (!ConfirmDialog.Ask(this, "保存账号", "更新此应用的同名账号？")) return;
+                if (vault == null || inlineEditor == null) return;
+                entry.Id = duplicate.Id;
+                if (!inlineEditor.ApplicationSelectionChanged && !string.IsNullOrEmpty(duplicate.AppPath))
+                {
+                    entry.AppPath = duplicate.AppPath;
+                    entry.AppHash = inlineTarget.Hash;
+                }
+            }
+        }
+        vault.Save(entry);
+        EndInlineEdit();
+        RebuildAutoLinks();
+        if (!MatchesSearch(entry, search.Text.Split((char[])null, StringSplitOptions.RemoveEmptyEntries)))
+            search.Clear();
+        RefreshEntries(entry.Id);
+        Status("账号已加密保存。");
+    }
+
+    private void CancelInlineEdit()
+    {
+        bool wasCreating = creatingEntry;
+        EndInlineEdit();
+        if (wasCreating) { CloseDetails(); return; }
+        RenderDetails();
+        list.Focus();
+    }
+
+    private void EndInlineEdit()
+    {
+        inlineEditor = null;
+        creatingEntry = false;
+        inlineTarget = null;
+        AcceptButton = null;
+        if (accountRows != null) accountRows.Enabled = true;
+        if (search != null) search.Enabled = true;
+        if (clearSearch != null) clearSearch.Enabled = true;
+        addAccount.Enabled = true;
     }
 
     private void Edit(VaultEntry entry, DesktopTarget target, string generated)
     {
         if (vault == null) return;
         ShowMain();
-        using (var dialog = new EntryDialog(entry, target, generated, catalog, RefreshCatalog))
+        if (inlineEditor != null) { inlineEditor.ShowError("请先保存或取消修改。"); return; }
+        VaultEntry draft = entry == null ? new VaultEntry { Id = Guid.NewGuid().ToString("N") } : entry.Copy();
+        if (target != null)
         {
-            if (dialog.ShowDialog(this) != DialogResult.OK || vault == null) return;
-            try
-            {
-                VaultEntry saved = dialog.Saved;
-                if (entry == null && target != null)
-                {
-                    var duplicate = vault.Entries.FirstOrDefault(item => DetectPath(item, target.Path) && item.User == saved.User);
-                    if (duplicate != null)
-                    {
-                        if (!ConfirmDialog.Ask(this, "保存账号", "更新此应用的同名账号？")) return;
-                        if (vault == null) return;
-                        saved.Id = duplicate.Id;
-                        if (!dialog.ApplicationSelectionChanged && !string.IsNullOrEmpty(duplicate.AppPath))
-                        {
-                            saved.AppPath = duplicate.AppPath;
-                            saved.AppHash = target.Hash;
-                        }
-                    }
-                }
-                vault.Save(saved);
-                RebuildAutoLinks();
-                RefreshEntries();
-                Status("账号已加密保存。");
-            }
-            catch (Exception error) { Status(error.Message); }
+            if (string.IsNullOrWhiteSpace(draft.Name)) draft.Name = target.Name;
+            if (string.IsNullOrWhiteSpace(draft.Notes)) draft.Notes = target.Name;
         }
+        if (generated != null) draft.Password = generated;
+        creatingEntry = entry == null;
+        inlineTarget = target;
+        detailsOpen = true;
+        details.Visible = true;
+        LayoutAccountTable();
+        ClearDetailControls();
+        RenderDetailHeading(creatingEntry ? "新建账号" : "编辑账号");
+        inlineEditor = new EntryEditor(draft, catalog, RefreshCatalog, SaveInlineEntry, CancelInlineEdit,
+            new Size(details.ClientSize.Width - 32, details.ClientSize.Height - 84))
+        { Location = new Point(16, 72) };
+        details.Controls.Add(inlineEditor);
+        AcceptButton = inlineEditor.SaveButton;
+        accountRows.Enabled = search.Enabled = clearSearch.Enabled = addAccount.Enabled = false;
+        inlineEditor.SelectNextControl(null, true, true, true, false);
     }
 
     private void RemoveSelected()
     {
         var entry = list == null ? null : list.SelectedItem as VaultEntry;
         if (entry == null) return;
-        if (!ConfirmDialog.Ask(this, "删除账号", "删除「" + entry.Name + "」？") || vault == null) return;
+        if (!ConfirmDialog.Ask(this, "删除账号", "删除「" + entry.Name + "」？", destructive: true) || vault == null) return;
         try { vault.Remove(entry.Id); RebuildAutoLinks(); RefreshEntries(); Status("账号已删除。"); }
         catch (Exception error) { Status(error.Message); }
     }
@@ -499,7 +894,7 @@ internal sealed class MainWindow : SoftWindow
                 BrowserBridge.Unregister(bridgePath);
             }
             RouteShortcut(true);
-        }, ExitApplication))
+        }))
             dialog.ShowDialog(this);
     }
 
@@ -524,7 +919,8 @@ internal sealed class MainWindow : SoftWindow
             switch (request.op)
             {
                 case "list":
-                    return new { items = relevant.Take(200).Select(entry => new { id = entry.Id, name = entry.Name, user = entry.User }).ToArray() };
+                    return new { items = VaultEntry.QuickFillOrder(relevant).Take(200)
+                        .Select(entry => new { id = entry.Id, name = entry.Name, user = entry.User }).ToArray() };
                 case "fill":
                     var found = relevant.FirstOrDefault(entry => entry.Id == request.id);
                     if (found != null) return new { user = found.User, password = found.Password };
@@ -622,7 +1018,35 @@ internal sealed class MainWindow : SoftWindow
         InstalledApp known = catalog.ByPath(target.Path);
         active.View.Accounts(known == null ? target.Name : known.Name, matches, changed,
             entry => FillPair(active, target, entry),
-            () => { CancelPopup(); Edit(null, target, null); }, () => ShowPopupGenerator(active, target));
+            () => { CancelPopup(); Edit(null, target, null); }, () => ShowPopupGenerator(active, target),
+            () => VerifyApplication(target));
+        popupInput.ArrowSelection = matches.Count > 1;
+    }
+
+    private async void VerifyApplication(DesktopTarget target)
+    {
+        CancelPopup();
+        ShowMain();
+        if (vault == null) return;
+        if (inlineEditor != null) { inlineEditor.ShowError("请先保存或取消修改。"); return; }
+        VaultSession opened = vault;
+        using (var dialog = new AppVerificationDialog(target.Name, target.Path))
+            if (dialog.ShowDialog(this) != DialogResult.OK || vault != opened) return;
+        Status("正在更新应用验证…");
+        try
+        {
+            string hash = await Task.Run(() => DesktopTarget.Fingerprint(target.Path));
+            if (vault != opened || closed) return;
+            if (!string.Equals(hash, target.Hash, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("应用文件再次发生变化，请重新打开快捷小窗并核对应用。");
+            opened.UpdateAppHash(target.Path, hash);
+            autoFingerprints[target.Path] = hash;
+            shownProcesses.Remove(target.ProcessId);
+            RebuildAutoLinks();
+            RefreshEntries();
+            Status("应用验证已更新。返回目标应用后可继续使用 Alt+C 填写。");
+        }
+        catch (Exception error) { if (!closed && vault == opened) Status(error.Message); }
     }
 
     private async void LoadCatalogInBackground()
@@ -641,10 +1065,12 @@ internal sealed class MainWindow : SoftWindow
         try
         {
             catalog = await scan;
+            appIcons.Clear();
             if (!closed && vault != null)
             {
                 RebuildAutoLinks();
-                RenderDetails();
+                if (search.TextLength > 0) RefreshEntries();
+                else { list.Invalidate(); RenderDetails(); }
                 if (popup == null) checkForegroundAt = DateTime.UtcNow.AddMilliseconds(350);
             }
             return catalog;
@@ -670,12 +1096,17 @@ internal sealed class MainWindow : SoftWindow
         }
     }
 
+    private string LinkedAppPath(VaultEntry entry)
+    {
+        if (!string.IsNullOrEmpty(entry.AppPath)) return entry.AppPath;
+        InstalledApp link;
+        return autoLinks.TryGetValue(entry.Id, out link) ? link.Path : null;
+    }
+
     private bool DetectPath(VaultEntry entry, string path)
     {
-        if (!string.IsNullOrEmpty(entry.AppPath))
-            return string.Equals(entry.AppPath, path, StringComparison.OrdinalIgnoreCase);
-        InstalledApp link;
-        return autoLinks.TryGetValue(entry.Id, out link) && string.Equals(link.Path, path, StringComparison.OrdinalIgnoreCase);
+        string linked = LinkedAppPath(entry);
+        return linked != null && string.Equals(linked, path, StringComparison.OrdinalIgnoreCase);
     }
 
     private List<VaultEntry> MatchingEntries(DesktopTarget target)
@@ -745,6 +1176,7 @@ internal sealed class MainWindow : SoftWindow
     {
         if (!IsCurrent(active) || active.Busy) return;
         active.Busy = true;
+        popupInput.ArrowSelection = false;
         active.View.EnableActions(false);
         try
         {
@@ -753,7 +1185,9 @@ internal sealed class MainWindow : SoftWindow
         }
         catch (Exception error)
         {
-            if (IsCurrent(active)) active.View.Message("填写已停止", error.Message, null, null);
+            if (IsCurrent(active))
+                active.View.Message("填写已停止", error.Message, "返回账号",
+                    () => ShowAccounts(active, target, MatchingEntries(target)));
         }
         finally { active.Busy = false; }
     }
@@ -761,6 +1195,7 @@ internal sealed class MainWindow : SoftWindow
     private void ShowPopupGenerator(PopupSession active, DesktopTarget target)
     {
         if (!IsCurrent(active)) return;
+        popupInput.ArrowSelection = false;
         string generated = Passwords.Generate(24, true);
         Action fill = null;
         if (target != null)
@@ -782,7 +1217,13 @@ internal sealed class MainWindow : SoftWindow
                 }
             };
         active.View.Generated(generated, () => ShowPopupGenerator(active, target),
-            () => { CancelPopup(); Edit(null, target, generated); }, fill);
+            () => { CancelPopup(); Edit(null, target, generated); }, fill, () =>
+            {
+                if (!IsCurrent(active)) return;
+                if (target != null) ShowAccounts(active, target, MatchingEntries(target));
+                else active.View.Tools(() => { CancelPopup(); Edit(null, null, null); },
+                    () => ShowPopupGenerator(active, null));
+            });
     }
 
     private bool IsCurrent(PopupSession active)
@@ -814,6 +1255,7 @@ internal sealed class MainWindow : SoftWindow
         if (vault != null) vault.Dispose();
         vault = null;
         autoLinks.Clear();
+        appIcons.Clear();
         autoFingerprints.Clear();
         shownProcesses.Clear();
         foreach (Form owned in OwnedForms) owned.Close();
@@ -826,10 +1268,10 @@ internal sealed class MainWindow : SoftWindow
 
     private void ShowMain()
     {
-        if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
         Show();
+        if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
         Activate();
-        trayIcon.Visible = false;
+        if (vault != null && inlineEditor == null) FocusBackground();
     }
 
     private void Status(string text) { status.Text = text; }
@@ -837,13 +1279,7 @@ internal sealed class MainWindow : SoftWindow
     internal static TextBox AddInput(Control parent, string label, int x, int y, int width, int max, bool mask)
     {
         parent.Controls.Add(Theme.Label(label, x, y, width, 22, Theme.Small, Theme.Muted));
-        var panel = new Panel { Bounds = new Rectangle(x, y + 23, width, 32), BackColor = Theme.Tint };
-        var input = new TextBox { Bounds = new Rectangle(10, 6, width - 20, 23), Font = Theme.Body,
-            BorderStyle = BorderStyle.None, BackColor = Theme.Tint, ForeColor = Theme.Ink,
-            UseSystemPasswordChar = mask, MaxLength = max, AccessibleName = label };
-        panel.Controls.Add(input);
-        parent.Controls.Add(panel);
-        return input;
+        return Theme.TextField(parent, new Rectangle(x, y + 23, width, 32), label, max, mask);
     }
 
     internal static SoftButton AddAction(Control parent, string text, int x, int y, int width, bool primary, Action action)
@@ -857,6 +1293,8 @@ internal sealed class MainWindow : SoftWindow
     [StructLayout(LayoutKind.Sequential)]
     private struct LastInput { public uint Size; public uint Time; }
     [DllImport("user32.dll")] private static extern bool GetLastInputInfo(ref LastInput data);
+    [DllImport("user32.dll", EntryPoint = "SendMessageW", CharSet = CharSet.Unicode)]
+    private static extern IntPtr SetCueBanner(IntPtr window, int message, IntPtr wParam, string text);
     [DllImport("kernel32.dll")] private static extern uint GetCurrentProcessId();
     private readonly uint currentProcessId = GetCurrentProcessId();
 

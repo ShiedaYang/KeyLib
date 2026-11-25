@@ -8,8 +8,12 @@ internal sealed class PopupInput : IDisposable
     internal const int Cancel = 1;
     internal const int Confirm = 2;
     private const int Released = 3;
+    internal const int Previous = 4;
+    internal const int Next = 5;
     private const int Escape = 0x1b;
     private const int Enter = 0x0d;
+    private const int Up = 0x26;
+    private const int Down = 0x28;
     private readonly IntPtr receiver;
     private readonly Hook mouseCallback;
     private readonly Hook keyCallback;
@@ -19,6 +23,8 @@ internal sealed class PopupInput : IDisposable
     private IntPtr target;
     private int serial;
     private int held;
+
+    internal bool ArrowSelection { get; set; }
 
     internal PopupInput(IntPtr receiver)
     {
@@ -40,6 +46,7 @@ internal sealed class PopupInput : IDisposable
 
     internal void Stop()
     {
+        ArrowSelection = false;
         panel = target = IntPtr.Zero;
         Remove(ref mouseHook);
         if (held == 0) Remove(ref keyHook);
@@ -68,8 +75,16 @@ internal sealed class PopupInput : IDisposable
     {
         if (code < 0) return CallNextHookEx(IntPtr.Zero, code, message, data);
         int key = Marshal.ReadInt32(data);
-        int mask = key == Enter ? 1 : key == Escape ? 2 : 0;
-        if (mask == 0) return CallNextHookEx(IntPtr.Zero, code, message, data);
+        int action;
+        switch (key)
+        {
+            case Enter: action = Confirm; break;
+            case Escape: action = Cancel; break;
+            case Up: action = Previous; break;
+            case Down: action = Next; break;
+            default: return CallNextHookEx(IntPtr.Zero, code, message, data);
+        }
+        int mask = 1 << action;
         int input = message.ToInt32();
         if ((held & mask) != 0)
         {
@@ -82,12 +97,13 @@ internal sealed class PopupInput : IDisposable
         }
 
         if (panel == IntPtr.Zero || target != Native.GetForegroundWindow() || input != 0x100 ||
+            ((action == Previous || action == Next) && !ArrowSelection) ||
             GetAsyncKeyState(0x11) < 0 || GetAsyncKeyState(0x10) < 0 || GetAsyncKeyState(0x12) < 0 ||
             GetAsyncKeyState(0x5b) < 0 || GetAsyncKeyState(0x5c) < 0)
             return CallNextHookEx(IntPtr.Zero, code, message, data);
 
         held |= mask;
-        PostMessage(receiver, MessageId, (IntPtr)(key == Enter ? Confirm : Cancel), (IntPtr)serial);
+        PostMessage(receiver, MessageId, (IntPtr)action, (IntPtr)serial);
         return (IntPtr)1;
     }
 

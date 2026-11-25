@@ -2,11 +2,13 @@
 
 const host = "org.softvault.local";
 const element = id => document.getElementById(id);
-const panels = ["saveForm", "generator"];
+const panels = ["saveForm", "generator", "updateConfirm"];
 let context;
 let generated = "";
 let busy = false;
-let firstFillButton = null;
+let fillButtons = [];
+let selectedIndex = -1;
+let pendingUpdate = null;
 
 function status(message = "") {
   element("status").textContent = message;
@@ -82,7 +84,7 @@ function operate(action) {
     if (busy) return;
     busy = true;
     status("");
-    const controls = [...document.querySelectorAll("button")];
+    const controls = [...document.querySelectorAll("button:not(:disabled)")].filter(button => button.getClientRects().length > 0);
     for (const control of controls) control.disabled = true;
     try { await action(); }
     catch (error) { status(error.message || "操作没有完成。"); }
@@ -95,15 +97,51 @@ function operate(action) {
 
 function showPanel(id) {
   for (const panel of panels) element(panel).hidden = panel !== id;
+  element("overview").hidden = Boolean(id);
+  element("panelHeading").hidden = !id;
+  element("back").hidden = id === "updateConfirm";
+  if (id) {
+    const [heading, focus] = {
+      saveForm: ["快速保存", "user"],
+      generator: ["随机密码", "length"],
+      updateConfirm: ["更新已保存的账号", "cancelUpdate"]
+    }[id];
+    element("panelTitle").textContent = heading;
+    element(focus).focus();
+  }
+}
+
+function selectAccount(index, moveFocus = false) {
+  if (selectedIndex === index) return;
+  if (selectedIndex >= 0) {
+    const previous = fillButtons[selectedIndex];
+    previous.parentElement.removeAttribute("aria-current");
+  }
+  selectedIndex = index;
+  const selected = fillButtons[index];
+  selected.parentElement.setAttribute("aria-current", "true");
+  if (moveFocus) selected.focus({ preventScroll: true });
+  if (!element("overview").hidden && !element("main").hidden) {
+    selected.scrollIntoView({ block: "nearest" });
+  }
+}
+
+function clearDraft() {
+  element("saveForm").reset();
+  element("generated").textContent = "";
+  generated = "";
+  pendingUpdate = null;
 }
 
 async function list() {
   const { items } = await native({ op: "list" });
   const target = element("accounts");
   target.replaceChildren();
-  firstFillButton = null;
-  element("keyboardHint").hidden = items.length === 0;
-  if (!items.length) status("这个网站还没有保存的账号。");
+  fillButtons = [];
+  selectedIndex = -1;
+  element("matches").hidden = !items.length;
+  element("noMatches").hidden = Boolean(items.length);
+  element("matchCount").textContent = items.length;
   for (const item of items) {
     const row = document.createElement("article");
     row.className = "account";
@@ -114,8 +152,11 @@ async function list() {
     user.textContent = item.user;
     description.append(name, user);
     const button = document.createElement("button");
-    button.textContent = "填写";
     button.className = "primary";
+    button.textContent = "填写";
+    button.setAttribute("aria-label", "填写 " + item.name);
+    const index = fillButtons.length;
+    button.addEventListener("focus", () => selectAccount(index));
     button.addEventListener("click", operate(async () => {
       const credential = await native({ op: "fill", id: item.id });
       await inPage("pair", credential);
@@ -123,8 +164,9 @@ async function list() {
     }));
     row.append(description, button);
     target.append(row);
-    if (!firstFillButton) firstFillButton = button;
+    fillButtons.push(button);
   }
+  if (fillButtons.length) selectAccount(0);
 }
 
 async function generate() {
@@ -139,6 +181,13 @@ async function generate() {
 
 element("openSave").addEventListener("click", () => showPanel("saveForm"));
 element("openGenerator").addEventListener("click", operate(async () => { showPanel("generator"); await generate(); }));
+element("back").addEventListener("click", () => {
+  const fromSave = !element("saveForm").hidden;
+  clearDraft();
+  showPanel(null);
+  status("");
+  element(fromSave ? "openSave" : "openGenerator").focus();
+});
 element("again").addEventListener("click", operate(generate));
 element("readPage").addEventListener("click", operate(async () => {
   const values = await inPage("read");
@@ -156,20 +205,28 @@ element("fillGenerated").addEventListener("click", operate(async () => {
   await inPage("generated", { password: generated });
   status("已填写密码。可以继续带入保存。");
 }));
-element("saveForm").addEventListener("submit", operate(async () => {
-  const request = { op: "save", user: element("user").value, password: element("password").value };
+async function saveAccount(id) {
+  const request = { op: "save", user: element("user").value, password: element("password").value, id };
   const result = await native(request);
   if (result.updateId) {
-    if (!window.confirm("更新这个网站的同名账号？")) return;
-    await native({ ...request, id: result.updateId });
+    pendingUpdate = result.updateId;
+    showPanel("updateConfirm");
+    return;
   }
-  element("saveForm").reset();
-  element("generated").textContent = "";
-  generated = "";
+  clearDraft();
   showPanel(null);
   await list();
   status("账号已加密保存。");
-}));
+  element("openSave").focus();
+}
+
+element("saveForm").addEventListener("submit", operate(() => saveAccount()));
+element("cancelUpdate").addEventListener("click", () => {
+  pendingUpdate = null;
+  status("");
+  showPanel("saveForm");
+});
+element("confirmUpdate").addEventListener("click", operate(() => saveAccount(pendingUpdate)));
 
 document.addEventListener("keydown", event => {
   if (event.key === "Escape") {
@@ -177,12 +234,18 @@ document.addEventListener("keydown", event => {
     window.close();
     return;
   }
-  if (event.key !== "Enter" || event.repeat || busy || !firstFillButton ||
-      event.altKey || event.ctrlKey || event.shiftKey || event.metaKey ||
-      !element("saveForm").hidden || !element("generator").hidden ||
-      event.target.closest?.("input, textarea, select, button, a")) return;
-  event.preventDefault();
-  firstFillButton.click();
+  if (busy || selectedIndex < 0 || event.altKey || event.ctrlKey || event.shiftKey ||
+      event.metaKey || element("overview").hidden) return;
+  const control = event.target.closest?.("input, textarea, select, button, a");
+  if (fillButtons.length > 1 && (event.key === "ArrowUp" || event.key === "ArrowDown") &&
+      (!control || fillButtons.includes(control))) {
+    event.preventDefault();
+    const step = event.key === "ArrowUp" ? -1 : 1;
+    selectAccount((selectedIndex + step + fillButtons.length) % fillButtons.length, true);
+  } else if (event.key === "Enter" && !control && !event.repeat) {
+    event.preventDefault();
+    fillButtons[selectedIndex].click();
+  }
 });
 
 (async () => {

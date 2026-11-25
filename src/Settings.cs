@@ -4,7 +4,7 @@ using System.Windows.Forms;
 
 internal sealed class SettingsDialog : VaultDialog
 {
-    internal SettingsDialog(bool connected, Action<bool> changeBridge, Action exit) : base("设置", 498, 352)
+    internal SettingsDialog(bool connected, Action<bool> changeBridge) : base("设置", 498, 300)
     {
         Controls.Add(Theme.Label("统一快捷键", 24, 63, 310, 26, Theme.BodyBold, Theme.Ink));
         var caps = new ShortcutKeys { Bounds = new Rectangle(24, 98, 300, 38) };
@@ -23,7 +23,6 @@ internal sealed class SettingsDialog : VaultDialog
         var status = Theme.Label(connected ? "本机连接已启用。" : "使用 Chrome 或 Edge 扩展前，先启用本机连接。",
             24, 245, 450, 37, Theme.Small, Theme.Muted);
         Controls.Add(status);
-        Action("退出 KeyLib", 24, 297, 125, false, () => { Close(); exit(); });
         toggle.Click += delegate
         {
             try

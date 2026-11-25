@@ -33,7 +33,7 @@ internal static class Program
             try { lease = new FileStream(Path.Combine(directory, "instance.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None); }
             catch (IOException)
             {
-                MessageBox.Show("已有一个KeyLib实例正在运行。", "KeyLib");
+                NoticeDialog.ShowMessage("KeyLib 已在运行", "从任务栏通知区域打开已运行的 KeyLib。");
                 return;
             }
             using (lease)
@@ -42,7 +42,7 @@ internal static class Program
         }
         catch (Exception error)
         {
-            MessageBox.Show("无法启动KeyLib。\r\n" + error.Message, "KeyLib", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            NoticeDialog.ShowMessage("无法启动 KeyLib", error.Message);
         }
     }
 }

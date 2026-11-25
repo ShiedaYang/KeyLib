@@ -16,7 +16,8 @@ $Destination = [IO.Path]::GetFullPath($Destination)
 New-Item -ItemType Directory -Path $Destination -Force | Out-Null
 $output = Join-Path $Destination 'KeyLib.exe'
 $references = @('/reference:System.Web.Extensions.dll', '/reference:System.Security.dll') + $refs
-& $compiler /nologo /target:winexe /platform:x64 /codepage:65001 /optimize+ "/out:$output" @references @files
+$icon = Join-Path $PSScriptRoot 'assets\KeyLib.ico'
+& $compiler /nologo /target:winexe /platform:x64 /codepage:65001 /optimize+ "/out:$output" "/win32icon:$icon" "/resource:$icon,KeyLib.Brand.ico" @references @files
 if ($LASTEXITCODE -ne 0) { throw "Compilation failed ($LASTEXITCODE)." }
 
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'third-party\libsodium.dll') -Destination $Destination -Force
